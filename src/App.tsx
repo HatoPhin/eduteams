@@ -82,6 +82,8 @@ interface Assignment {
   dueDate: string;
   description: string;
   channel: string;
+  attachmentName?: string;
+  attachmentUrl?: string;
   submissions: Submission[];
 }
 
@@ -134,24 +136,31 @@ export default function App() {
       id: 'asg-1',
       title: '第3回：情報通信プロトコルの考察レポート',
       dueDate: '2026-10-15T23:59',
-      description: '講義で扱ったトランスポート層（TCP/UDP）の特性差と、リアルタイム通信で求められる要件について論じなさい。',
+      description: '講義で扱ったトランスポート層（TCP/UDP）の特性差と、リアルタイム通信で求められる要件について論じなさい。指定の配布フォーマットに従って記述してください。',
       channel: 'general',
+      attachmentName: 'レポート指定フォーマット.docx',
+      attachmentUrl: '#',
       submissions: []
     }
   ]);
   const [submissionText, setSubmissionText] = useState<{ [key: string]: string }>({});
   
-  // 課題作成モーダル
+  // 課題作成モーダル用ステート
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDueDate, setNewDueDate] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newAsgChannel, setNewAsgChannel] = useState('general');
+  const [newAsgFile, setNewAsgFile] = useState<File | null>(null);
+  const [asgUploading, setAsgUploading] = useState(false);
+  const asgFileInputRef = useRef<HTMLInputElement>(null);
 
-  // 課題編集モーダル
+  // 課題編集モーダル用ステート
   const [editingAssignment, setEditingAssignment] = useState<Assignment | null>(null);
+  const [editAsgFile, setEditAsgFile] = useState<File | null>(null);
+  const editFileInputRef = useRef<HTMLInputElement>(null);
 
-  // 提出物評価ステート (教員用: studentName-asgId をキーにする)
+  // 提出物評価ステート
   const [gradingState, setGradingState] = useState<{ [key: string]: { score: string; feedback: string } }>({});
 
   useEffect(() => {
@@ -295,36 +304,97 @@ export default function App() {
     }
   };
 
-  // 課題作成 (教員)
-  const handleCreateAssignment = (e: React.FormEvent) => {
+  // 課題作成 (教員・ファイル添付対応)
+  const handleCreateAssignment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim() || !newDueDate.trim()) return;
 
-    const newAssignment: Assignment = {
-      id: `asg-${Date.now()}`,
-      title: newTitle,
-      dueDate: newDueDate,
-      description: newDesc,
-      channel: newAsgChannel,
-      submissions: []
-    };
+    setAsgUploading(true);
+    let attachedName: string | undefined = undefined;
+    let attachedUrl: string | undefined = undefined;
 
-    setAssignments((prev) => [newAssignment, ...prev]);
-    setNewTitle('');
-    setNewDueDate('');
-    setNewDesc('');
-    setShowCreateModal(false);
+    try {
+      if (newAsgFile) {
+        const uploaded = await storage.createFile(
+          STORAGE_BUCKET_ID,
+          ID.unique(),
+          newAsgFile
+        );
+        attachedName = newAsgFile.name;
+        attachedUrl = storage.getFileDownload(STORAGE_BUCKET_ID, uploaded.$id).toString();
+
+        // 共有ファイルタブにも配布資料として自動追加
+        setSharedFiles((prev) => [
+          {
+            id: uploaded.$id,
+            name: `[課題配布] ${newAsgFile.name}`,
+            url: attachedUrl!,
+            size: `${(newAsgFile.size / 1024 / 1024).toFixed(2)} MB`,
+            date: new Date().toLocaleDateString('ja-JP')
+          },
+          ...prev
+        ]);
+      }
+
+      const newAssignment: Assignment = {
+        id: `asg-${Date.now()}`,
+        title: newTitle,
+        dueDate: newDueDate,
+        description: newDesc,
+        channel: newAsgChannel,
+        attachmentName: attachedName,
+        attachmentUrl: attachedUrl,
+        submissions: []
+      };
+
+      setAssignments((prev) => [newAssignment, ...prev]);
+      setNewTitle('');
+      setNewDueDate('');
+      setNewDesc('');
+      setNewAsgFile(null);
+      if (asgFileInputRef.current) asgFileInputRef.current.value = '';
+      setShowCreateModal(false);
+    } catch (err) {
+      console.error('課題作成・ファイルアップロードエラー:', err);
+      alert('配布ファイルのアップロードに失敗しました。');
+    } finally {
+      setAsgUploading(false);
+    }
   };
 
   // 課題編集保存 (教員)
-  const handleSaveEditAssignment = (e: React.FormEvent) => {
+  const handleSaveEditAssignment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingAssignment) return;
 
+    let attachedName = editingAssignment.attachmentName;
+    let attachedUrl = editingAssignment.attachmentUrl;
+
+    if (editAsgFile) {
+      try {
+        const uploaded = await storage.createFile(
+          STORAGE_BUCKET_ID,
+          ID.unique(),
+          editAsgFile
+        );
+        attachedName = editAsgFile.name;
+        attachedUrl = storage.getFileDownload(STORAGE_BUCKET_ID, uploaded.$id).toString();
+      } catch (err) {
+        console.error('編集ファイルアップロードエラー:', err);
+        alert('ファイルの更新に失敗しました。');
+        return;
+      }
+    }
+
     setAssignments((prev) =>
-      prev.map((asg) => (asg.id === editingAssignment.id ? editingAssignment : asg))
+      prev.map((asg) => 
+        asg.id === editingAssignment.id 
+          ? { ...editingAssignment, attachmentName: attachedName, attachmentUrl: attachedUrl } 
+          : asg
+      )
     );
     setEditingAssignment(null);
+    setEditAsgFile(null);
   };
 
   // 課題削除 (教員)
@@ -480,7 +550,7 @@ export default function App() {
           href={fileUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 my-1.5 bg-[#2a2a2a] hover:bg-[#333] border border-gray-600 rounded text-xs text-indigo-300 hover:text-indigo-200 transition"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 my-1.5 bg-[#2a2a2a] hover:bg-[#333] border border-gray-600 rounded text-xs text-indigo-300 hover:text-indigo-200 transition-all duration-200 shadow-sm hover:shadow"
         >
           <FileText size={14} />
           <span>{fileName}</span>
@@ -500,7 +570,7 @@ export default function App() {
   if (authLoading) {
     return (
       <div className="flex h-screen items-center justify-center bg-[#1f1f1f] text-gray-300">
-        <div className="text-sm flex items-center gap-2">
+        <div className="text-sm flex items-center gap-2 animate-pulse">
           <Clock className="animate-spin text-indigo-400" size={18} />
           認証情報を確認中...
         </div>
@@ -511,9 +581,9 @@ export default function App() {
   if (!currentUser) {
     return (
       <div className="flex h-screen items-center justify-center bg-[#18181b] text-gray-200 font-sans p-4">
-        <div className="w-full max-w-md bg-[#242427] border border-[#3f3f46] rounded-xl p-8 shadow-2xl">
+        <div className="w-full max-w-md bg-[#242427] border border-[#3f3f46] rounded-xl p-8 shadow-2xl transition-all duration-300 transform scale-100">
           <div className="flex flex-col items-center mb-6">
-            <div className="w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center font-bold text-white text-xl shadow-lg mb-3">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-indigo-700 to-indigo-500 flex items-center justify-center font-bold text-white text-xl shadow-lg mb-3">
               ET
             </div>
             <h1 className="text-lg font-bold tracking-wide text-white">EduTeams ログイン</h1>
@@ -526,7 +596,7 @@ export default function App() {
           </div>
 
           {authError && (
-            <div className="mb-4 p-3 bg-red-950/40 border border-red-500/40 text-red-300 rounded text-xs leading-relaxed">
+            <div className="mb-4 p-3 bg-red-950/40 border border-red-500/40 text-red-300 rounded text-xs leading-relaxed animate-fade-in">
               {authError}
             </div>
           )}
@@ -542,7 +612,7 @@ export default function App() {
                   placeholder="name@univ.ac.jp"
                   value={authEmail}
                   onChange={(e) => setAuthEmail(e.target.value)}
-                  className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
                 />
               </div>
             </div>
@@ -557,14 +627,14 @@ export default function App() {
                   placeholder="••••••••"
                   value={authPassword}
                   onChange={(e) => setAuthPassword(e.target.value)}
-                  className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
                 />
               </div>
             </div>
 
             <button
               type="submit"
-              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition shadow-md mt-2"
+              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 active:scale-[0.99] text-white text-xs font-semibold rounded-lg transition-all duration-150 shadow-md mt-2"
             >
               サインイン
             </button>
@@ -578,13 +648,13 @@ export default function App() {
     <div className="flex h-screen bg-[#1f1f1f] text-gray-200 select-none font-sans overflow-hidden">
       {/* 最左端：アプリアイコンバー */}
       <div className="w-16 bg-[#201f1e] flex flex-col items-center py-4 border-r border-[#2d2c2c] gap-6 shrink-0">
-        <div className="w-10 h-10 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-md">
+        <div className="w-10 h-10 rounded-lg bg-gradient-to-tr from-indigo-700 to-indigo-500 flex items-center justify-center font-bold text-white shadow-md">
           ET
         </div>
         <div className="flex flex-col gap-4 text-gray-400">
           <button 
             onClick={() => { setCurrentNav('teams'); setCurrentTab('posts'); }}
-            className={`flex flex-col items-center gap-1 transition ${
+            className={`flex flex-col items-center gap-1 transition-all duration-200 transform hover:scale-105 ${
               currentNav === 'teams' ? 'text-indigo-400 font-bold' : 'hover:text-white'
             }`}
           >
@@ -593,7 +663,7 @@ export default function App() {
           </button>
           <button 
             onClick={() => { setCurrentNav('chat'); setCurrentTab('posts'); }}
-            className={`flex flex-col items-center gap-1 transition ${
+            className={`flex flex-col items-center gap-1 transition-all duration-200 transform hover:scale-105 ${
               currentNav === 'chat' ? 'text-indigo-400 font-bold' : 'hover:text-white'
             }`}
           >
@@ -602,7 +672,7 @@ export default function App() {
           </button>
           <button 
             onClick={() => { setCurrentNav('assignments'); setCurrentTab('assignments'); }}
-            className={`flex flex-col items-center gap-1 transition ${
+            className={`flex flex-col items-center gap-1 transition-all duration-200 transform hover:scale-105 ${
               currentNav === 'assignments' ? 'text-indigo-400 font-bold' : 'hover:text-white'
             }`}
           >
@@ -612,7 +682,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* 左サイドバー：チーム＆チャンネル一覧 */}
+      {/* 左サイドバー */}
       <div className="w-64 bg-[#2b2b2b] flex flex-col border-r border-[#383838] shrink-0">
         <div className="h-14 px-4 flex items-center justify-between border-b border-[#383838]">
           <span className="font-semibold text-sm tracking-wide truncate" title={teamName}>
@@ -621,7 +691,7 @@ export default function App() {
           {userRole === 'teacher' && (
             <button
               onClick={() => setShowAddChannelModal(true)}
-              className="text-gray-400 hover:text-white p-1 rounded"
+              className="text-gray-400 hover:text-white p-1.5 hover:bg-[#333] rounded transition-all duration-150 transform hover:rotate-90"
               title="チャンネルを追加"
             >
               <Plus size={16} />
@@ -636,8 +706,8 @@ export default function App() {
           {channels.map((chan) => (
             <div
               key={chan.id}
-              className={`group flex items-center justify-between px-3 py-2 rounded-md text-xs font-medium transition cursor-pointer ${
-                activeChannel === chan.id ? 'bg-[#3b3a39] text-white' : 'text-gray-300 hover:bg-[#333333]'
+              className={`group flex items-center justify-between px-3 py-2 rounded-md text-xs font-medium transition-all duration-150 cursor-pointer ${
+                activeChannel === chan.id ? 'bg-[#3b3a39] text-white shadow-sm' : 'text-gray-300 hover:bg-[#333333]'
               }`}
               onClick={() => setActiveChannel(chan.id)}
             >
@@ -651,7 +721,7 @@ export default function App() {
                     e.stopPropagation();
                     handleDeleteChannel(chan.id, chan.name);
                   }}
-                  className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-400 transition p-0.5"
+                  className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-400 transition-opacity p-0.5 rounded"
                   title="チャンネル削除"
                 >
                   <Trash2 size={13} />
@@ -664,7 +734,7 @@ export default function App() {
         {/* ユーザーアカウント & ログアウト */}
         <div className="p-3 border-t border-[#383838] bg-[#242424] flex items-center justify-between">
           <div className="flex items-center gap-2 overflow-hidden">
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs shrink-0 transition-transform hover:scale-105 ${
               userRole === 'teacher' ? 'bg-amber-600 text-white' : 'bg-indigo-600 text-white'
             }`}>
               {userRole === 'teacher' ? <GraduationCap size={15} /> : displayUserName.slice(0, 2)}
@@ -677,7 +747,7 @@ export default function App() {
           <button
             onClick={handleLogout}
             title="ログアウト"
-            className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-[#333] rounded transition"
+            className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-[#333] rounded transition-colors"
           >
             <LogOut size={16} />
           </button>
@@ -700,7 +770,7 @@ export default function App() {
             <div className="flex items-center gap-1">
               <button
                 onClick={() => setCurrentTab('posts')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition ${
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-150 ${
                   currentTab === 'posts' ? 'bg-[#3b3a39] text-white shadow-sm' : 'text-gray-400 hover:text-white'
                 }`}
               >
@@ -708,7 +778,7 @@ export default function App() {
               </button>
               <button
                 onClick={() => setCurrentTab('files')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition ${
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-150 ${
                   currentTab === 'files' ? 'bg-[#3b3a39] text-white shadow-sm' : 'text-gray-400 hover:text-white'
                 }`}
               >
@@ -716,18 +786,17 @@ export default function App() {
               </button>
               <button
                 onClick={() => setCurrentTab('assignments')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition ${
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-150 ${
                   currentTab === 'assignments' ? 'bg-[#3b3a39] text-white shadow-sm' : 'text-gray-400 hover:text-white'
                 }`}
               >
                 課題
               </button>
 
-              {/* 教員専用タブ：管理設定 */}
               {userRole === 'teacher' && (
                 <button
                   onClick={() => setCurrentTab('settings')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition ${
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-150 ${
                     currentTab === 'settings' ? 'bg-amber-600 text-white shadow-sm' : 'text-amber-400 hover:text-amber-200'
                   }`}
                 >
@@ -747,16 +816,16 @@ export default function App() {
 
         {/* 1. 投稿タブ */}
         {currentTab === 'posts' && (
-          <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex-1 flex flex-col overflow-hidden animate-fade-in">
             <div className="flex-1 p-6 overflow-y-auto space-y-4">
               {loading ? (
-                <div className="text-center text-gray-500 text-sm mt-8">メッセージを読み込み中...</div>
+                <div className="text-center text-gray-500 text-sm mt-8 animate-pulse">メッセージを読み込み中...</div>
               ) : messages.length === 0 ? (
                 <div className="text-center text-gray-500 text-sm mt-8">メッセージはまだありません。最初の投稿をしてみましょう！</div>
               ) : (
                 messages.map((msg) => (
-                  <div key={msg.$id} className="flex gap-3 items-start group hover:bg-[#262626] p-2 rounded-md transition">
-                    <div className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${
+                  <div key={msg.$id} className="flex gap-3 items-start group hover:bg-[#262626] p-2.5 rounded-lg transition-all duration-150">
+                    <div className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs shrink-0 shadow-sm transition-transform group-hover:scale-105 ${
                       msg.sender_role === 'teacher' ? 'bg-amber-600 text-white' : 'bg-indigo-600 text-white'
                     }`}>
                       {msg.sender_role === 'teacher' ? <GraduationCap size={16} /> : msg.sender_name.slice(0, 2)}
@@ -783,7 +852,7 @@ export default function App() {
 
             <div className="p-4 bg-[#242424] border-t border-[#2d2c2c]">
               {selectedFile && (
-                <div className="mb-2 p-2 bg-[#1b1b1b] border border-indigo-500/50 rounded flex items-center justify-between">
+                <div className="mb-2 p-2 bg-[#1b1b1b] border border-indigo-500/50 rounded-lg flex items-center justify-between animate-fade-in shadow">
                   <div className="flex items-center gap-2 text-xs text-indigo-300">
                     <Paperclip size={14} />
                     <span className="font-medium">{selectedFile.name}</span>
@@ -791,14 +860,14 @@ export default function App() {
                   </div>
                   <button 
                     onClick={() => { setSelectedFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
-                    className="text-gray-400 hover:text-white"
+                    className="text-gray-400 hover:text-white p-1 rounded transition-colors"
                   >
                     <X size={14} />
                   </button>
                 </div>
               )}
 
-              <form onSubmit={handleSendMessage} className="bg-[#1f1f1f] rounded-lg border border-[#383838] focus-within:border-indigo-500 transition">
+              <form onSubmit={handleSendMessage} className="bg-[#1f1f1f] rounded-lg border border-[#383838] focus-within:border-indigo-500 transition-colors shadow-sm">
                 <textarea
                   rows={2}
                   value={inputContent}
@@ -829,17 +898,17 @@ export default function App() {
                     <button 
                       type="button" 
                       onClick={() => fileInputRef.current?.click()}
-                      className="hover:text-white transition"
+                      className="hover:text-white transition-colors transform hover:scale-110"
                       title="ファイルを添付"
                     >
                       <Paperclip size={16} />
                     </button>
-                    <button type="button" className="hover:text-white transition"><Smile size={16} /></button>
+                    <button type="button" className="hover:text-white transition-colors transform hover:scale-110"><Smile size={16} /></button>
                   </div>
                   <button
                     type="submit"
                     disabled={(!inputContent.trim() && !selectedFile) || uploading}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 text-white text-xs font-medium transition"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:opacity-40 disabled:hover:bg-indigo-600 text-white text-xs font-medium transition-all shadow"
                   >
                     <Send size={13} />
                     <span>{uploading ? '送信中...' : '送信'}</span>
@@ -852,7 +921,7 @@ export default function App() {
 
         {/* 2. ファイルタブ */}
         {currentTab === 'files' && (
-          <div className="flex-1 p-8 overflow-y-auto">
+          <div className="flex-1 p-8 overflow-y-auto animate-fade-in">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-base font-semibold text-white flex items-center gap-2">
                 <FolderOpen size={20} className="text-indigo-400" />
@@ -866,10 +935,10 @@ export default function App() {
                   href={file.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="p-4 bg-[#262626] border border-[#383838] rounded-lg hover:border-gray-500 transition block group"
+                  className="p-4 bg-[#262626] border border-[#383838] rounded-xl hover:border-indigo-500/50 hover:bg-[#2c2c2c] transition-all duration-200 transform hover:-translate-y-1 hover:shadow-lg block group"
                 >
                   <div className="flex items-center gap-3 mb-2">
-                    <FileText className="text-indigo-400 shrink-0" size={24} />
+                    <FileText className="text-indigo-400 shrink-0 transition-transform group-hover:scale-110" size={24} />
                     <div className="overflow-hidden">
                       <h3 className="text-xs font-medium text-white truncate group-hover:text-indigo-300">{file.name}</h3>
                       <p className="text-[10px] text-gray-400">{file.date} • {file.size}</p>
@@ -883,7 +952,7 @@ export default function App() {
 
         {/* 3. 課題タブ */}
         {currentTab === 'assignments' && (
-          <div className="flex-1 p-8 overflow-y-auto">
+          <div className="flex-1 p-8 overflow-y-auto animate-fade-in">
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="text-base font-semibold text-white flex items-center gap-2">
@@ -891,14 +960,14 @@ export default function App() {
                   課題一覧
                 </h2>
                 <p className="text-xs text-gray-400 mt-1">
-                  {userRole === 'teacher' ? '教員用：課題の作成・編集・削除、提出物の採点が行えます' : '生徒用：課題の確認、提出および期限前の取り下げが行えます'}
+                  {userRole === 'teacher' ? '教員用：課題の作成・編集・削除、配布ファイルの添付、提出物の採点が行えます' : '生徒用：課題の確認、配布資料の参照、提出および期限前の取り下げが行えます'}
                 </p>
               </div>
 
               {userRole === 'teacher' && (
                 <button
                   onClick={() => setShowCreateModal(true)}
-                  className="flex items-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-md transition shadow"
+                  className="flex items-center gap-2 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-medium rounded-lg transition-all shadow-md hover:shadow-indigo-500/20"
                 >
                   <PlusCircle size={16} />
                   新規課題を作成
@@ -906,11 +975,11 @@ export default function App() {
               )}
             </div>
 
-            {/* 新規課題作成モーダル */}
+            {/* 新規課題作成モーダル（配布資料添付対応） */}
             {showCreateModal && (
-              <div className="mb-6 p-5 bg-[#252525] border border-[#3b3a39] rounded-lg">
+              <div className="mb-6 p-6 bg-[#252525] border border-[#3b3a39] rounded-xl shadow-xl transition-all duration-200 animate-fade-in">
                 <h3 className="text-sm font-semibold text-white mb-3">新しい課題を作成</h3>
-                <form onSubmit={handleCreateAssignment} className="space-y-3">
+                <form onSubmit={handleCreateAssignment} className="space-y-4">
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="text-[11px] text-gray-400 block mb-1">課題タイトル</label>
@@ -920,7 +989,7 @@ export default function App() {
                         placeholder="例: 第4回 計算機システム課題"
                         value={newTitle}
                         onChange={(e) => setNewTitle(e.target.value)}
-                        className="w-full bg-[#1e1e1e] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                        className="w-full bg-[#1e1e1e] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
                       />
                     </div>
                     <div>
@@ -928,7 +997,7 @@ export default function App() {
                       <select
                         value={newAsgChannel}
                         onChange={(e) => setNewAsgChannel(e.target.value)}
-                        className="w-full bg-[#1e1e1e] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                        className="w-full bg-[#1e1e1e] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
                       >
                         {channels.map((c) => (
                           <option key={c.id} value={c.id}>#{c.name}</option>
@@ -948,7 +1017,7 @@ export default function App() {
                       value={newDueDate}
                       onChange={(e) => setNewDueDate(e.target.value)}
                       style={{ colorScheme: 'dark' }}
-                      className="w-full bg-[#1e1e1e] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                      className="w-full bg-[#1e1e1e] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
                     />
                   </div>
 
@@ -959,33 +1028,78 @@ export default function App() {
                       placeholder="課題の要件や提出フォーマットを入力"
                       value={newDesc}
                       onChange={(e) => setNewDesc(e.target.value)}
-                      className="w-full bg-[#1e1e1e] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500 resize-none"
+                      className="w-full bg-[#1e1e1e] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-indigo-500 resize-none transition-colors"
                     />
                   </div>
 
-                  <div className="flex gap-2 justify-end pt-1">
+                  {/* 課題用 配布資料ファイル添付 */}
+                  <div>
+                    <label className="text-[11px] text-gray-400 flex items-center gap-1.5 mb-1">
+                      <Paperclip size={13} className="text-indigo-400" />
+                      配布資料・課題ファイル（PDF, Word, Excelなど）
+                    </label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="file"
+                        ref={asgFileInputRef}
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            setNewAsgFile(e.target.files[0]);
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => asgFileInputRef.current?.click()}
+                        className="px-3 py-1.5 bg-[#333] hover:bg-[#3d3d3d] text-gray-200 text-xs rounded-lg border border-gray-600 flex items-center gap-2 transition-all hover:scale-105"
+                      >
+                        <FolderOpen size={14} />
+                        ファイルを選択
+                      </button>
+                      {newAsgFile ? (
+                        <div className="flex items-center gap-2 text-xs text-indigo-300 bg-indigo-950/40 px-2.5 py-1 rounded-md border border-indigo-500/30">
+                          <FileText size={13} />
+                          <span>{newAsgFile.name}</span>
+                          <span className="text-gray-400 text-[10px]">({(newAsgFile.size / 1024).toFixed(1)} KB)</span>
+                          <button
+                            type="button"
+                            onClick={() => { setNewAsgFile(null); if (asgFileInputRef.current) asgFileInputRef.current.value = ''; }}
+                            className="hover:text-white ml-1"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[11px] text-gray-500">選択されていません（任意）</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2 justify-end pt-2">
                     <button
                       type="button"
                       onClick={() => setShowCreateModal(false)}
-                      className="px-3 py-1.5 text-xs text-gray-400 hover:text-white border border-gray-600 rounded"
+                      className="px-3.5 py-1.5 text-xs text-gray-400 hover:text-white border border-gray-600 rounded-lg transition-colors"
                     >
                       キャンセル
                     </button>
                     <button
                       type="submit"
-                      className="px-4 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium"
+                      disabled={asgUploading}
+                      className="px-4 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:opacity-50 text-white rounded-lg font-medium transition-all shadow"
                     >
-                      公開する
+                      {asgUploading ? 'アップロード＆公開中...' : '公開する'}
                     </button>
                   </div>
                 </form>
               </div>
             )}
 
-            {/* 課題編集モーダル */}
+            {/* 課題編集モーダル（ポップアップ・アニメーション） */}
             {editingAssignment && (
-              <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-                <div className="w-full max-w-lg bg-[#242427] border border-[#3f3f46] rounded-xl p-6 shadow-2xl">
+              <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50 transition-opacity">
+                <div className="w-full max-w-lg bg-[#242427] border border-[#3f3f46] rounded-xl p-6 shadow-2xl transition-all duration-200 transform scale-100">
                   <h3 className="text-sm font-semibold text-white mb-4">課題の編集</h3>
                   <form onSubmit={handleSaveEditAssignment} className="space-y-3">
                     <div>
@@ -995,7 +1109,7 @@ export default function App() {
                         required
                         value={editingAssignment.title}
                         onChange={(e) => setEditingAssignment({ ...editingAssignment, title: e.target.value })}
-                        className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                        className="w-full bg-[#18181b] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
                       />
                     </div>
                     <div>
@@ -1006,7 +1120,7 @@ export default function App() {
                         value={editingAssignment.dueDate}
                         onChange={(e) => setEditingAssignment({ ...editingAssignment, dueDate: e.target.value })}
                         style={{ colorScheme: 'dark' }}
-                        className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                        className="w-full bg-[#18181b] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
                       />
                     </div>
                     <div>
@@ -1015,20 +1129,53 @@ export default function App() {
                         rows={3}
                         value={editingAssignment.description}
                         onChange={(e) => setEditingAssignment({ ...editingAssignment, description: e.target.value })}
-                        className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500 resize-none"
+                        className="w-full bg-[#18181b] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-indigo-500 resize-none transition-colors"
                       />
                     </div>
-                    <div className="flex gap-2 justify-end pt-2">
+
+                    {/* 配布ファイルの差し替え */}
+                    <div>
+                      <label className="text-[11px] text-gray-400 block mb-1">配布資料ファイル</label>
+                      {editingAssignment.attachmentName && !editAsgFile && (
+                        <div className="flex items-center gap-2 mb-2 text-xs text-indigo-300 bg-indigo-950/30 p-2 rounded border border-indigo-500/30">
+                          <FileText size={14} />
+                          <span>現在: {editingAssignment.attachmentName}</span>
+                        </div>
+                      )}
+                      <input
+                        type="file"
+                        ref={editFileInputRef}
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            setEditAsgFile(e.target.files[0]);
+                          }
+                        }}
+                      />
                       <button
                         type="button"
-                        onClick={() => setEditingAssignment(null)}
-                        className="px-3 py-1.5 text-xs text-gray-400 hover:text-white border border-gray-600 rounded"
+                        onClick={() => editFileInputRef.current?.click()}
+                        className="px-3 py-1.5 bg-[#333] hover:bg-[#3d3d3d] text-gray-200 text-xs rounded-lg border border-gray-600 flex items-center gap-2 transition-all hover:scale-105"
+                      >
+                        <FolderOpen size={14} />
+                        新しいファイルを選択して差し替え
+                      </button>
+                      {editAsgFile && (
+                        <span className="text-xs text-emerald-400 block mt-1">選択中: {editAsgFile.name}</span>
+                      )}
+                    </div>
+
+                    <div className="flex gap-2 justify-end pt-3">
+                      <button
+                        type="button"
+                        onClick={() => { setEditingAssignment(null); setEditAsgFile(null); }}
+                        className="px-3.5 py-1.5 text-xs text-gray-400 hover:text-white border border-gray-600 rounded-lg transition-colors"
                       >
                         キャンセル
                       </button>
                       <button
                         type="submit"
-                        className="px-4 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium"
+                        className="px-4 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white rounded-lg font-medium transition-all shadow"
                       >
                         変更を保存
                       </button>
@@ -1046,7 +1193,7 @@ export default function App() {
                 const isPastDue = new Date().getTime() > new Date(asg.dueDate).getTime();
 
                 return (
-                  <div key={asg.id} className="p-5 bg-[#252526] border border-[#383838] rounded-lg">
+                  <div key={asg.id} className="p-5 bg-[#252526] border border-[#383838] hover:border-gray-600 rounded-xl transition-all duration-200 transform hover:-translate-y-0.5 shadow-md">
                     <div className="flex items-start justify-between">
                       <div>
                         <div className="flex items-center gap-2">
@@ -1057,14 +1204,14 @@ export default function App() {
                             <div className="flex items-center gap-1.5 ml-2">
                               <button
                                 onClick={() => setEditingAssignment(asg)}
-                                className="text-gray-400 hover:text-white transition p-1"
+                                className="text-gray-400 hover:text-white transition-colors p-1 rounded"
                                 title="課題を編集"
                               >
                                 <Edit2 size={13} />
                               </button>
                               <button
                                 onClick={() => handleDeleteAssignment(asg.id, asg.title)}
-                                className="text-gray-400 hover:text-red-400 transition p-1"
+                                className="text-gray-400 hover:text-red-400 transition-colors p-1 rounded"
                                 title="課題を削除"
                               >
                                 <Trash2 size={13} />
@@ -1075,7 +1222,7 @@ export default function App() {
                         <h3 className="text-sm font-semibold text-white mt-1">{asg.title}</h3>
                       </div>
 
-                      <div className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded ${
+                      <div className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md ${
                         isPastDue ? 'bg-red-950/40 text-red-300 border border-red-500/30' : 'bg-[#1f1f1f] text-gray-300 border border-gray-700'
                       }`}>
                         <Clock size={14} className={isPastDue ? 'text-red-400' : 'text-amber-400'} />
@@ -1084,15 +1231,34 @@ export default function App() {
                       </div>
                     </div>
 
-                    <p className="text-xs text-gray-300 mt-2.5 leading-relaxed bg-[#1d1d1d] p-3 rounded">
+                    <p className="text-xs text-gray-300 mt-2.5 leading-relaxed bg-[#1d1d1d] p-3 rounded-lg">
                       {asg.description}
                     </p>
+
+                    {/* 教員が設定した配布資料（PDFやWord）のダウンロードカード */}
+                    {asg.attachmentName && asg.attachmentUrl && (
+                      <div className="mt-3">
+                        <a
+                          href={asg.attachmentUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-2 px-3 py-2 bg-[#2a2a2d] hover:bg-[#333338] border border-indigo-500/40 rounded-lg text-xs text-indigo-300 hover:text-indigo-200 transition-all duration-200 shadow-sm hover:scale-[1.02]"
+                        >
+                          <FileText size={16} className="text-indigo-400" />
+                          <div className="flex flex-col text-left">
+                            <span className="font-medium">{asg.attachmentName}</span>
+                            <span className="text-[10px] text-gray-400">クリックして配布資料をダウンロード</span>
+                          </div>
+                          <Download size={13} className="ml-2 text-indigo-400" />
+                        </a>
+                      </div>
+                    )}
 
                     {/* 生徒視点：提出 & 取り下げ & 採点確認 */}
                     {userRole === 'student' && (
                       <div className="mt-4 pt-4 border-t border-[#333]">
                         {isSubmitted ? (
-                          <div className="bg-emerald-950/30 border border-emerald-500/40 p-3.5 rounded-md flex flex-col gap-2">
+                          <div className="bg-emerald-950/30 border border-emerald-500/40 p-3.5 rounded-lg flex flex-col gap-2 animate-fade-in">
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
                                 <CheckCircle2 size={18} className="text-emerald-400 shrink-0" />
@@ -1104,7 +1270,7 @@ export default function App() {
                               {!isPastDue ? (
                                 <button
                                   onClick={() => handleCancelSubmission(asg.id, asg.dueDate, mySubmission.content)}
-                                  className="flex items-center gap-1 px-2.5 py-1 text-[11px] text-gray-300 hover:text-white bg-[#2b2b2b] hover:bg-[#383838] border border-gray-600 rounded transition"
+                                  className="flex items-center gap-1 px-2.5 py-1 text-[11px] text-gray-300 hover:text-white bg-[#2b2b2b] hover:bg-[#383838] active:scale-95 border border-gray-600 rounded-md transition-all"
                                 >
                                   <RotateCcw size={12} />
                                   提出を取り下げて編集
@@ -1117,13 +1283,13 @@ export default function App() {
                               )}
                             </div>
 
-                            <p className="text-xs text-gray-300 bg-[#191919] p-2.5 rounded border border-[#2e2e2e] leading-relaxed">
+                            <p className="text-xs text-gray-300 bg-[#191919] p-2.5 rounded-md border border-[#2e2e2e] leading-relaxed">
                               {mySubmission.content}
                             </p>
 
                             {/* 教員からの評価・採点がある場合 */}
                             {(mySubmission.score || mySubmission.feedback) && (
-                              <div className="mt-2 p-2.5 bg-[#202020] border border-amber-500/40 rounded text-xs">
+                              <div className="mt-2 p-2.5 bg-[#202020] border border-amber-500/40 rounded-md text-xs animate-fade-in">
                                 <div className="font-semibold text-amber-400 flex items-center gap-1.5 mb-1">
                                   <GraduationCap size={15} />
                                   教員からの評価: {mySubmission.score ? `${mySubmission.score} 点` : '評価済み'}
@@ -1137,7 +1303,7 @@ export default function App() {
                         ) : (
                           <div className="space-y-2">
                             {isPastDue ? (
-                              <div className="p-3 bg-red-950/20 border border-red-500/30 rounded text-xs text-red-400 flex items-center gap-2">
+                              <div className="p-3 bg-red-950/20 border border-red-500/30 rounded-lg text-xs text-red-400 flex items-center gap-2">
                                 <AlertCircle size={16} />
                                 提出期限を過ぎているため、この課題は新規提出できません。
                               </div>
@@ -1148,12 +1314,12 @@ export default function App() {
                                   value={submissionText[asg.id] || ''}
                                   onChange={(e) => setSubmissionText({ ...submissionText, [asg.id]: e.target.value })}
                                   placeholder="提出レポートの内容、または成果物URLを入力..."
-                                  className="w-full bg-[#1b1b1b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500 resize-none"
+                                  className="w-full bg-[#1b1b1b] border border-gray-700 rounded-lg p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500 resize-none transition-colors"
                                 />
                                 <div className="flex justify-end">
                                   <button
                                     onClick={() => handleSubmitAssignment(asg.id, asg.dueDate)}
-                                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded transition"
+                                    className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-medium rounded-lg transition-all shadow"
                                   >
                                     課題を提出する
                                   </button>
@@ -1176,7 +1342,7 @@ export default function App() {
                             {asg.submissions.map((sub, idx) => {
                               const key = `${asg.id}-${sub.studentName}`;
                               return (
-                                <div key={idx} className="p-3 bg-[#1e1e1e] rounded text-xs border border-[#333] space-y-2">
+                                <div key={idx} className="p-3 bg-[#1e1e1e] rounded-lg text-xs border border-[#333] space-y-2 hover:border-gray-600 transition-colors">
                                   <div className="flex justify-between items-start">
                                     <div>
                                       <span className="font-semibold text-white">{sub.studentName}</span>
@@ -1188,7 +1354,6 @@ export default function App() {
                                     </span>
                                   </div>
 
-                                  {/* 採点入力欄 */}
                                   <div className="pt-2 border-t border-[#2a2a2a] flex items-center gap-2">
                                     <input
                                       type="text"
@@ -1200,7 +1365,7 @@ export default function App() {
                                           [key]: { ...prev[key], score: e.target.value, feedback: prev[key]?.feedback || sub.feedback || '' }
                                         }))
                                       }
-                                      className="w-24 bg-[#141414] border border-gray-700 rounded px-2 py-1 text-xs text-white"
+                                      className="w-24 bg-[#141414] border border-gray-700 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-amber-500 transition-colors"
                                     />
                                     <input
                                       type="text"
@@ -1212,11 +1377,11 @@ export default function App() {
                                           [key]: { ...prev[key], feedback: e.target.value, score: prev[key]?.score || sub.score || '' }
                                         }))
                                       }
-                                      className="flex-1 bg-[#141414] border border-gray-700 rounded px-2 py-1 text-xs text-white"
+                                      className="flex-1 bg-[#141414] border border-gray-700 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-amber-500 transition-colors"
                                     />
                                     <button
                                       onClick={() => handleGradeSubmission(asg.id, sub.studentName)}
-                                      className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white text-[11px] rounded transition flex items-center gap-1"
+                                      className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 active:scale-95 text-white text-[11px] rounded-md transition-all flex items-center gap-1 shadow"
                                     >
                                       <Check size={12} />
                                       保存
@@ -1238,7 +1403,7 @@ export default function App() {
 
         {/* 4. 教員専用タブ：管理設定 */}
         {currentTab === 'settings' && userRole === 'teacher' && (
-          <div className="flex-1 p-8 overflow-y-auto space-y-6">
+          <div className="flex-1 p-8 overflow-y-auto space-y-6 animate-fade-in">
             <div>
               <h2 className="text-base font-semibold text-white flex items-center gap-2">
                 <Settings size={20} className="text-amber-400" />
@@ -1249,32 +1414,30 @@ export default function App() {
               </p>
             </div>
 
-            {/* チーム基本設定 */}
-            <div className="p-5 bg-[#252526] border border-[#383838] rounded-lg">
+            <div className="p-5 bg-[#252526] border border-[#383838] rounded-xl shadow-md">
               <h3 className="text-sm font-semibold text-white mb-3">チームの基本情報</h3>
               <div className="flex items-center gap-3">
                 <input
                   type="text"
                   value={teamName}
                   onChange={(e) => setTeamName(e.target.value)}
-                  className="flex-1 max-w-md bg-[#1b1b1b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                  className="flex-1 max-w-md bg-[#1b1b1b] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-amber-500 transition-colors"
                 />
                 <button
                   onClick={() => alert('チーム名を更新しました。')}
-                  className="px-3 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium rounded transition"
+                  className="px-3.5 py-2 bg-amber-600 hover:bg-amber-500 active:scale-95 text-white text-xs font-medium rounded-lg transition-all shadow"
                 >
                   名称を更新
                 </button>
               </div>
             </div>
 
-            {/* チャンネル管理 */}
-            <div className="p-5 bg-[#252526] border border-[#383838] rounded-lg">
+            <div className="p-5 bg-[#252526] border border-[#383838] rounded-xl shadow-md">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-white">チャンネル一覧の管理</h3>
                 <button
                   onClick={() => setShowAddChannelModal(true)}
-                  className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs rounded transition flex items-center gap-1"
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs rounded-lg transition-all flex items-center gap-1 shadow"
                 >
                   <Plus size={14} />
                   新規チャンネル追加
@@ -1283,7 +1446,7 @@ export default function App() {
 
               <div className="space-y-2">
                 {channels.map((chan) => (
-                  <div key={chan.id} className="p-3 bg-[#1e1e1e] rounded flex items-center justify-between border border-[#333]">
+                  <div key={chan.id} className="p-3 bg-[#1e1e1e] rounded-lg flex items-center justify-between border border-[#333] hover:border-gray-600 transition-colors">
                     <div>
                       <span className="font-semibold text-xs text-white">#{chan.name}</span>
                       <p className="text-[11px] text-gray-400">{chan.description}</p>
@@ -1291,7 +1454,7 @@ export default function App() {
                     {channels.length > 1 && (
                       <button
                         onClick={() => handleDeleteChannel(chan.id, chan.name)}
-                        className="text-gray-400 hover:text-red-400 p-1.5 rounded transition"
+                        className="text-gray-400 hover:text-red-400 p-1.5 rounded transition-colors"
                         title="チャンネルを削除"
                       >
                         <Trash2 size={15} />
@@ -1302,21 +1465,20 @@ export default function App() {
               </div>
             </div>
 
-            {/* 全課題サマリー */}
-            <div className="p-5 bg-[#252526] border border-[#383838] rounded-lg">
+            <div className="p-5 bg-[#252526] border border-[#383838] rounded-xl shadow-md">
               <h3 className="text-sm font-semibold text-white mb-3">全課題の集計サマリー</h3>
               <div className="grid grid-cols-3 gap-4">
-                <div className="p-3 bg-[#1e1e1e] rounded border border-[#333]">
+                <div className="p-4 bg-[#1e1e1e] rounded-lg border border-[#333] transition-all hover:border-gray-600 hover:-translate-y-0.5">
                   <p className="text-[11px] text-gray-400">公開中課題数</p>
                   <p className="text-xl font-bold text-white mt-1">{assignments.length}</p>
                 </div>
-                <div className="p-3 bg-[#1e1e1e] rounded border border-[#333]">
+                <div className="p-4 bg-[#1e1e1e] rounded-lg border border-[#333] transition-all hover:border-gray-600 hover:-translate-y-0.5">
                   <p className="text-[11px] text-gray-400">総提出件数</p>
                   <p className="text-xl font-bold text-emerald-400 mt-1">
                     {assignments.reduce((acc, cur) => acc + cur.submissions.length, 0)}
                   </p>
                 </div>
-                <div className="p-3 bg-[#1e1e1e] rounded border border-[#333]">
+                <div className="p-4 bg-[#1e1e1e] rounded-lg border border-[#333] transition-all hover:border-gray-600 hover:-translate-y-0.5">
                   <p className="text-[11px] text-gray-400">参加チャンネル数</p>
                   <p className="text-xl font-bold text-indigo-400 mt-1">{channels.length}</p>
                 </div>
@@ -1328,8 +1490,8 @@ export default function App() {
 
       {/* チャンネル新規追加モーダル */}
       {showAddChannelModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="w-full max-w-sm bg-[#242427] border border-[#3f3f46] rounded-xl p-6 shadow-2xl">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="w-full max-w-sm bg-[#242427] border border-[#3f3f46] rounded-xl p-6 shadow-2xl transition-all duration-200 transform scale-100">
             <h3 className="text-sm font-semibold text-white mb-3">新規チャンネルを作成</h3>
             <form onSubmit={handleAddChannel} className="space-y-3">
               <div>
@@ -1340,7 +1502,7 @@ export default function App() {
                   placeholder="例: 期末演習プロジェクト"
                   value={newChannelName}
                   onChange={(e) => setNewChannelName(e.target.value)}
-                  className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  className="w-full bg-[#18181b] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
                 />
               </div>
               <div>
@@ -1350,20 +1512,20 @@ export default function App() {
                   placeholder="チャンネルの目的を入力"
                   value={newChannelDesc}
                   onChange={(e) => setNewChannelDesc(e.target.value)}
-                  className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  className="w-full bg-[#18181b] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
                 />
               </div>
               <div className="flex gap-2 justify-end pt-2">
                 <button
                   type="button"
                   onClick={() => setShowAddChannelModal(false)}
-                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-white border border-gray-600 rounded"
+                  className="px-3.5 py-1.5 text-xs text-gray-400 hover:text-white border border-gray-600 rounded-lg transition-colors"
                 >
                   キャンセル
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium"
+                  className="px-4 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white rounded-lg font-medium transition-all shadow"
                 >
                   作成
                 </button>
