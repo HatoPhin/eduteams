@@ -19,7 +19,6 @@ import {
   Smile, 
   GraduationCap, 
   Hash, 
-  ChevronDown, 
   FileText, 
   Clock, 
   CheckCircle2, 
