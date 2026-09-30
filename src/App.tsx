@@ -33,10 +33,9 @@ import {
   LogOut,
   Lock,
   Mail,
-  User
+  ShieldCheck
 } from 'lucide-react';
 
-// ユーザー設定のカスタム型定義
 interface UserPrefs extends Models.Preferences {
   role?: 'student' | 'teacher';
 }
@@ -73,17 +72,12 @@ interface Assignment {
 }
 
 export default function App() {
-  // 認証関連ステート
   const [currentUser, setCurrentUser] = useState<Models.User<UserPrefs> | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
-  const [authName, setAuthName] = useState('');
-  const [authRole, setAuthRole] = useState<'student' | 'teacher'>('student');
   const [authError, setAuthError] = useState('');
 
-  // アプリUI・ナビゲーション
   const [currentNav, setCurrentNav] = useState<'chat' | 'teams' | 'assignments'>('teams');
   const [currentTab, setCurrentTab] = useState<'posts' | 'files' | 'assignments'>('posts');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -92,7 +86,6 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // ファイル添付
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -106,7 +99,6 @@ export default function App() {
     }
   ]);
 
-  // 課題
   const [assignments, setAssignments] = useState<Assignment[]>([
     {
       id: 'asg-1',
@@ -123,7 +115,6 @@ export default function App() {
   const [newDesc, setNewDesc] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
 
-  // 1. 初回ログイン状態チェック
   useEffect(() => {
     checkLoggedInUser();
   }, []);
@@ -140,7 +131,6 @@ export default function App() {
     }
   };
 
-  // ログイン処理
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
@@ -148,26 +138,10 @@ export default function App() {
       await account.createEmailPasswordSession(authEmail, authPassword);
       await checkLoggedInUser();
     } catch (err: any) {
-      setAuthError(err.message || 'ログインに失敗しました。メールアドレスとパスワードを確認してください。');
+      setAuthError(err.message || 'ログインに失敗しました。登録済みのメールアドレスとパスワードを確認してください。');
     }
   };
 
-  // アカウント新規登録処理
-  const handleRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthError('');
-    try {
-      await account.create(ID.unique(), authEmail, authPassword, authName);
-      await account.createEmailPasswordSession(authEmail, authPassword);
-      // ロール情報を Preferences に保存
-      await account.updatePrefs<UserPrefs>({ role: authRole });
-      await checkLoggedInUser();
-    } catch (err: any) {
-      setAuthError(err.message || 'アカウント作成に失敗しました。');
-    }
-  };
-
-  // ログアウト処理
   const handleLogout = async () => {
     if (!confirm('ログアウトしますか？')) return;
     try {
@@ -179,11 +153,9 @@ export default function App() {
     }
   };
 
-  // ログイン中ユーザー情報
   const userRole: 'student' | 'teacher' = currentUser?.prefs?.role === 'teacher' ? 'teacher' : 'student';
-  const displayUserName = currentUser?.name || '匿名ユーザー';
+  const displayUserName = currentUser?.name || '受講生';
 
-  // 2. メッセージ取得 & Realtime購読（ログイン時のみ）
   useEffect(() => {
     if (!currentUser) return;
     setLoading(true);
@@ -226,7 +198,6 @@ export default function App() {
     }
   }, [messages, currentTab]);
 
-  // メッセージ送信処理
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputContent.trim() && !selectedFile) return;
@@ -283,7 +254,6 @@ export default function App() {
     }
   };
 
-  // 課題作成（教員用）
   const handleCreateAssignment = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim() || !newDueDate.trim()) return;
@@ -304,7 +274,6 @@ export default function App() {
     setShowCreateModal(false);
   };
 
-  // 課題提出（生徒用）
   const handleSubmitAssignment = (assignmentId: string, dueDate: string) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため提出できません。');
@@ -341,7 +310,6 @@ export default function App() {
     alert('課題を提出しました！');
   };
 
-  // 課題取り下げ
   const handleCancelSubmission = (assignmentId: string, dueDate: string, previousContent: string) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため取り下げはできません。');
@@ -407,19 +375,18 @@ export default function App() {
     return parts;
   };
 
-  // 認証確認中のロード画面
   if (authLoading) {
     return (
       <div className="flex h-screen items-center justify-center bg-[#1f1f1f] text-gray-300">
         <div className="text-sm flex items-center gap-2">
           <Clock className="animate-spin text-indigo-400" size={18} />
-          ログイン状態を確認中...
+          認証情報を確認中...
         </div>
       </div>
     );
   }
 
-  // 未ログイン時：ログイン／新規登録画面
+  // サインイン専用画面（新規登録は非表示）
   if (!currentUser) {
     return (
       <div className="flex h-screen items-center justify-center bg-[#18181b] text-gray-200 font-sans p-4">
@@ -429,7 +396,12 @@ export default function App() {
               ET
             </div>
             <h1 className="text-lg font-bold tracking-wide text-white">EduTeams ログイン</h1>
-            <p className="text-xs text-gray-400 mt-1">講義・演習コラボレーションシステム</p>
+            <p className="text-xs text-gray-400 mt-1">関係者専用コラボレーション環境</p>
+          </div>
+
+          <div className="mb-5 p-3 bg-indigo-950/40 border border-indigo-500/30 rounded-lg flex items-start gap-2.5 text-xs text-indigo-200">
+            <ShieldCheck size={18} className="text-indigo-400 shrink-0 mt-0.5" />
+            <span>このシステムは招待制です。管理者より発行されたアカウント情報でサインインしてください。</span>
           </div>
 
           {authError && (
@@ -438,50 +410,7 @@ export default function App() {
             </div>
           )}
 
-          <form onSubmit={isRegisterMode ? handleRegister : handleLogin} className="space-y-4">
-            {isRegisterMode && (
-              <>
-                <div>
-                  <label className="text-xs text-gray-300 font-medium block mb-1">氏名 / ニックネーム</label>
-                  <div className="relative">
-                    <User size={15} className="absolute left-3 top-3 text-gray-400" />
-                    <input
-                      type="text"
-                      required
-                      placeholder="例: 山田 太郎"
-                      value={authName}
-                      onChange={(e) => setAuthName(e.target.value)}
-                      className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs text-gray-300 font-medium block mb-1">登録ロール</label>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setAuthRole('student')}
-                      className={`flex-1 py-2 text-xs rounded-lg border font-medium transition ${
-                        authRole === 'student' ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-gray-700 text-gray-400'
-                      }`}
-                    >
-                      生徒 / 受講生
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAuthRole('teacher')}
-                      className={`flex-1 py-2 text-xs rounded-lg border font-medium transition ${
-                        authRole === 'teacher' ? 'bg-amber-600 border-amber-500 text-white' : 'border-gray-700 text-gray-400'
-                      }`}
-                    >
-                      教員 / TA
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-
+          <form onSubmit={handleLogin} className="space-y-4">
             <div>
               <label className="text-xs text-gray-300 font-medium block mb-1">メールアドレス</label>
               <div className="relative">
@@ -489,7 +418,7 @@ export default function App() {
                 <input
                   type="email"
                   required
-                  placeholder="user@example.com"
+                  placeholder="name@univ.ac.jp"
                   value={authEmail}
                   onChange={(e) => setAuthEmail(e.target.value)}
                   className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500"
@@ -504,8 +433,7 @@ export default function App() {
                 <input
                   type="password"
                   required
-                  minLength={8}
-                  placeholder="8文字以上"
+                  placeholder="••••••••"
                   value={authPassword}
                   onChange={(e) => setAuthPassword(e.target.value)}
                   className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500"
@@ -517,28 +445,16 @@ export default function App() {
               type="submit"
               className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition shadow-md mt-2"
             >
-              {isRegisterMode ? '新規アカウントを作成してログイン' : 'サインイン'}
+              サインイン
             </button>
           </form>
-
-          <div className="mt-5 text-center">
-            <button
-              type="button"
-              onClick={() => { setIsRegisterMode(!isRegisterMode); setAuthError(''); }}
-              className="text-xs text-indigo-400 hover:text-indigo-300 font-medium transition"
-            >
-              {isRegisterMode ? 'アカウントを既にお持ちの方はこちら (ログイン)' : 'アカウントをお持ちでない方はこちら (新規登録)'}
-            </button>
-          </div>
         </div>
       </div>
     );
   }
 
-  // ログイン後のメイン画面
   return (
     <div className="flex h-screen bg-[#1f1f1f] text-gray-200 select-none font-sans overflow-hidden">
-      {/* 最左端：アプリアイコンバー */}
       <div className="w-16 bg-[#201f1e] flex flex-col items-center py-4 border-r border-[#2d2c2c] gap-6 shrink-0">
         <div className="w-10 h-10 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-md">
           ET
@@ -574,7 +490,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* 左サイドバー：チャンネル一覧 & アカウント情報 */}
       <div className="w-64 bg-[#2b2b2b] flex flex-col border-r border-[#383838] shrink-0">
         <div className="h-14 px-4 flex items-center justify-between border-b border-[#383838]">
           <span className="font-semibold text-sm tracking-wide">情報通信工学 演習</span>
@@ -602,7 +517,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* ユーザーアカウント & ログアウト */}
         <div className="mt-auto p-3 border-t border-[#383838] bg-[#242424] flex items-center justify-between">
           <div className="flex items-center gap-2 overflow-hidden">
             <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${
@@ -625,9 +539,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* メインエリア */}
       <div className="flex-1 flex flex-col bg-[#1f1f1f]">
-        {/* ヘッダー */}
         <div className="h-14 px-6 border-b border-[#2d2c2c] flex items-center justify-between bg-[#242424]">
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2">
@@ -672,7 +584,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* 投稿タブ */}
         {currentTab === 'posts' && (
           <div className="flex-1 flex flex-col overflow-hidden">
             <div className="flex-1 p-6 overflow-y-auto space-y-4">
@@ -777,7 +688,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ファイル一覧タブ */}
         {currentTab === 'files' && (
           <div className="flex-1 p-8 overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
@@ -808,7 +718,6 @@ export default function App() {
           </div>
         )}
 
-        {/* 課題タブ */}
         {currentTab === 'assignments' && (
           <div className="flex-1 p-8 overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
