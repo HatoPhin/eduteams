@@ -19,21 +19,26 @@ import {
   Smile, 
   GraduationCap, 
   Hash, 
-  ChevronDown,
-  FileText,
-  Clock,
-  CheckCircle2,
-  PlusCircle,
-  FolderOpen,
-  Calendar,
-  AlertCircle,
-  RotateCcw,
-  Download,
-  X,
-  LogOut,
-  Lock,
-  Mail,
-  ShieldCheck
+  ChevronDown, 
+  FileText, 
+  Clock, 
+  CheckCircle2, 
+  PlusCircle, 
+  FolderOpen, 
+  Calendar, 
+  AlertCircle, 
+  RotateCcw, 
+  Download, 
+  X, 
+  LogOut, 
+  Lock, 
+  Mail, 
+  ShieldCheck,
+  Settings,
+  Edit2,
+  Trash2,
+  Check,
+  Plus
 } from 'lucide-react';
 
 interface UserPrefs extends Models.Preferences {
@@ -58,17 +63,27 @@ interface SharedFileItem {
   date: string;
 }
 
+interface ChannelItem {
+  id: string;
+  name: string;
+  description: string;
+}
+
+interface Submission {
+  studentName: string;
+  submittedAt: string;
+  content: string;
+  score?: string;
+  feedback?: string;
+}
+
 interface Assignment {
   id: string;
   title: string;
   dueDate: string;
   description: string;
   channel: string;
-  submissions: {
-    studentName: string;
-    submittedAt: string;
-    content: string;
-  }[];
+  submissions: Submission[];
 }
 
 export default function App() {
@@ -78,14 +93,29 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState('');
 
+  // ナビゲーション
   const [currentNav, setCurrentNav] = useState<'chat' | 'teams' | 'assignments'>('teams');
-  const [currentTab, setCurrentTab] = useState<'posts' | 'files' | 'assignments'>('posts');
+  const [currentTab, setCurrentTab] = useState<'posts' | 'files' | 'assignments' | 'settings'>('posts');
+  
+  // チーム・チャンネル
+  const [teamName, setTeamName] = useState('情報通信工学 演習クラス');
+  const [channels, setChannels] = useState<ChannelItem[]>([
+    { id: 'general', name: '一般（講義連絡）', description: '講義全体の連絡・お知らせ' },
+    { id: 'questions', name: '質問・相談', description: '課題や講義内容に関する質疑応答' },
+    { id: 'lab', name: '演習・実験実習', description: '環境構築や演習の進行' }
+  ]);
+  const [activeChannel, setActiveChannel] = useState('general');
+  const [newChannelName, setNewChannelName] = useState('');
+  const [newChannelDesc, setNewChannelDesc] = useState('');
+  const [showAddChannelModal, setShowAddChannelModal] = useState(false);
+
+  // チャット
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputContent, setInputContent] = useState('');
-  const [activeChannel, setActiveChannel] = useState('general');
   const [loading, setLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // ファイル
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -99,6 +129,7 @@ export default function App() {
     }
   ]);
 
+  // 課題
   const [assignments, setAssignments] = useState<Assignment[]>([
     {
       id: 'asg-1',
@@ -110,10 +141,19 @@ export default function App() {
     }
   ]);
   const [submissionText, setSubmissionText] = useState<{ [key: string]: string }>({});
+  
+  // 課題作成モーダル
+  const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDueDate, setNewDueDate] = useState('');
   const [newDesc, setNewDesc] = useState('');
-  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [newAsgChannel, setNewAsgChannel] = useState('general');
+
+  // 課題編集モーダル
+  const [editingAssignment, setEditingAssignment] = useState<Assignment | null>(null);
+
+  // 提出物評価ステート (教員用: studentName-asgId をキーにする)
+  const [gradingState, setGradingState] = useState<{ [key: string]: { score: string; feedback: string } }>({});
 
   useEffect(() => {
     checkLoggedInUser();
@@ -138,7 +178,7 @@ export default function App() {
       await account.createEmailPasswordSession(authEmail, authPassword);
       await checkLoggedInUser();
     } catch (err: any) {
-      setAuthError(err.message || 'ログインに失敗しました。登録済みのメールアドレスとパスワードを確認してください。');
+      setAuthError(err.message || 'ログインに失敗しました。');
     }
   };
 
@@ -156,6 +196,7 @@ export default function App() {
   const userRole: 'student' | 'teacher' = currentUser?.prefs?.role === 'teacher' ? 'teacher' : 'student';
   const displayUserName = currentUser?.name || '受講生';
 
+  // メッセージ購読
   useEffect(() => {
     if (!currentUser) return;
     setLoading(true);
@@ -198,6 +239,7 @@ export default function App() {
     }
   }, [messages, currentTab]);
 
+  // メッセージ送信
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputContent.trim() && !selectedFile) return;
@@ -254,6 +296,7 @@ export default function App() {
     }
   };
 
+  // 課題作成 (教員)
   const handleCreateAssignment = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim() || !newDueDate.trim()) return;
@@ -263,7 +306,7 @@ export default function App() {
       title: newTitle,
       dueDate: newDueDate,
       description: newDesc,
-      channel: activeChannel,
+      channel: newAsgChannel,
       submissions: []
     };
 
@@ -274,6 +317,24 @@ export default function App() {
     setShowCreateModal(false);
   };
 
+  // 課題編集保存 (教員)
+  const handleSaveEditAssignment = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingAssignment) return;
+
+    setAssignments((prev) =>
+      prev.map((asg) => (asg.id === editingAssignment.id ? editingAssignment : asg))
+    );
+    setEditingAssignment(null);
+  };
+
+  // 課題削除 (教員)
+  const handleDeleteAssignment = (id: string, title: string) => {
+    if (!confirm(`課題「${title}」を削除しますか？\n提出データもすべて失われます。`)) return;
+    setAssignments((prev) => prev.filter((asg) => asg.id !== id));
+  };
+
+  // 課題提出 (生徒)
   const handleSubmitAssignment = (assignmentId: string, dueDate: string) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため提出できません。');
@@ -310,6 +371,7 @@ export default function App() {
     alert('課題を提出しました！');
   };
 
+  // 提出取り下げ (生徒)
   const handleCancelSubmission = (assignmentId: string, dueDate: string, previousContent: string) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため取り下げはできません。');
@@ -331,6 +393,67 @@ export default function App() {
     );
 
     setSubmissionText((prev) => ({ ...prev, [assignmentId]: previousContent }));
+  };
+
+  // 採点とフィードバック登録 (教員)
+  const handleGradeSubmission = (asgId: string, studentName: string) => {
+    const key = `${asgId}-${studentName}`;
+    const grade = gradingState[key];
+    if (!grade) return;
+
+    setAssignments((prev) =>
+      prev.map((asg) => {
+        if (asg.id === asgId) {
+          return {
+            ...asg,
+            submissions: asg.submissions.map((sub) => {
+              if (sub.studentName === studentName) {
+                return {
+                  ...sub,
+                  score: grade.score || sub.score,
+                  feedback: grade.feedback || sub.feedback
+                };
+              }
+              return sub;
+            })
+          };
+        }
+        return asg;
+      })
+    );
+    alert(`${studentName} さんの評価を保存しました。`);
+  };
+
+  // チャンネル作成 (教員)
+  const handleAddChannel = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newChannelName.trim()) return;
+
+    const id = newChannelName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    const newChan: ChannelItem = {
+      id: id || `chan-${Date.now()}`,
+      name: newChannelName.trim(),
+      description: newChannelDesc.trim() || 'チャンネルの説明はありません'
+    };
+
+    setChannels((prev) => [...prev, newChan]);
+    setNewChannelName('');
+    setNewChannelDesc('');
+    setShowAddChannelModal(false);
+  };
+
+  // チャンネル削除 (教員)
+  const handleDeleteChannel = (id: string, name: string) => {
+    if (channels.length <= 1) {
+      alert('チャンネルをすべて削除することはできません。');
+      return;
+    }
+    if (!confirm(`チャンネル「#${name}」を削除しますか？`)) return;
+
+    setChannels((prev) => prev.filter((c) => c.id !== id));
+    if (activeChannel === id) {
+      setActiveChannel(channels[0].id === id ? channels[1].id : channels[0].id);
+    }
   };
 
   const formatDateTime = (dtStr: string) => {
@@ -386,7 +509,6 @@ export default function App() {
     );
   }
 
-  // サインイン専用画面（新規登録は非表示）
   if (!currentUser) {
     return (
       <div className="flex h-screen items-center justify-center bg-[#18181b] text-gray-200 font-sans p-4">
@@ -455,6 +577,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-[#1f1f1f] text-gray-200 select-none font-sans overflow-hidden">
+      {/* 最左端：アプリアイコンバー */}
       <div className="w-16 bg-[#201f1e] flex flex-col items-center py-4 border-r border-[#2d2c2c] gap-6 shrink-0">
         <div className="w-10 h-10 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-md">
           ET
@@ -490,34 +613,57 @@ export default function App() {
         </div>
       </div>
 
+      {/* 左サイドバー：チーム＆チャンネル一覧 */}
       <div className="w-64 bg-[#2b2b2b] flex flex-col border-r border-[#383838] shrink-0">
         <div className="h-14 px-4 flex items-center justify-between border-b border-[#383838]">
-          <span className="font-semibold text-sm tracking-wide">情報通信工学 演習</span>
-          <ChevronDown size={16} className="text-gray-400 cursor-pointer" />
-        </div>
-        <div className="p-3 flex flex-col gap-1 overflow-y-auto">
-          <span className="text-xs font-semibold text-gray-400 px-2 py-1">チャネル</span>
-          <button
-            onClick={() => setActiveChannel('general')}
-            className={`flex items-center gap-2 px-3 py-2 rounded-md text-xs font-medium transition ${
-              activeChannel === 'general' ? 'bg-[#3b3a39] text-white' : 'text-gray-300 hover:bg-[#333333]'
-            }`}
-          >
-            <Hash size={16} />
-            一般（講義連絡）
-          </button>
-          <button
-            onClick={() => setActiveChannel('questions')}
-            className={`flex items-center gap-2 px-3 py-2 rounded-md text-xs font-medium transition ${
-              activeChannel === 'questions' ? 'bg-[#3b3a39] text-white' : 'text-gray-300 hover:bg-[#333333]'
-            }`}
-          >
-            <Hash size={16} />
-            質問・相談
-          </button>
+          <span className="font-semibold text-sm tracking-wide truncate" title={teamName}>
+            {teamName}
+          </span>
+          {userRole === 'teacher' && (
+            <button
+              onClick={() => setShowAddChannelModal(true)}
+              className="text-gray-400 hover:text-white p-1 rounded"
+              title="チャンネルを追加"
+            >
+              <Plus size={16} />
+            </button>
+          )}
         </div>
 
-        <div className="mt-auto p-3 border-t border-[#383838] bg-[#242424] flex items-center justify-between">
+        <div className="p-3 flex flex-col gap-1 overflow-y-auto flex-1">
+          <div className="flex items-center justify-between px-2 py-1">
+            <span className="text-xs font-semibold text-gray-400">チャネル</span>
+          </div>
+          {channels.map((chan) => (
+            <div
+              key={chan.id}
+              className={`group flex items-center justify-between px-3 py-2 rounded-md text-xs font-medium transition cursor-pointer ${
+                activeChannel === chan.id ? 'bg-[#3b3a39] text-white' : 'text-gray-300 hover:bg-[#333333]'
+              }`}
+              onClick={() => setActiveChannel(chan.id)}
+            >
+              <div className="flex items-center gap-2 truncate">
+                <Hash size={16} className="shrink-0 text-gray-400" />
+                <span className="truncate">{chan.name}</span>
+              </div>
+              {userRole === 'teacher' && channels.length > 1 && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteChannel(chan.id, chan.name);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-400 transition p-0.5"
+                  title="チャンネル削除"
+                >
+                  <Trash2 size={13} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* ユーザーアカウント & ログアウト */}
+        <div className="p-3 border-t border-[#383838] bg-[#242424] flex items-center justify-between">
           <div className="flex items-center gap-2 overflow-hidden">
             <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${
               userRole === 'teacher' ? 'bg-amber-600 text-white' : 'bg-indigo-600 text-white'
@@ -539,16 +685,19 @@ export default function App() {
         </div>
       </div>
 
+      {/* メインエリア */}
       <div className="flex-1 flex flex-col bg-[#1f1f1f]">
+        {/* ヘッダー */}
         <div className="h-14 px-6 border-b border-[#2d2c2c] flex items-center justify-between bg-[#242424]">
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2">
               <Hash size={18} className="text-gray-400" />
               <h1 className="font-semibold text-sm">
-                {activeChannel === 'general' ? '一般（講義連絡）' : '質問・相談'}
+                {channels.find((c) => c.id === activeChannel)?.name || activeChannel}
               </h1>
             </div>
 
+            {/* 上部タブ */}
             <div className="flex items-center gap-1">
               <button
                 onClick={() => setCurrentTab('posts')}
@@ -574,16 +723,30 @@ export default function App() {
               >
                 課題
               </button>
+
+              {/* 教員専用タブ：管理設定 */}
+              {userRole === 'teacher' && (
+                <button
+                  onClick={() => setCurrentTab('settings')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition ${
+                    currentTab === 'settings' ? 'bg-amber-600 text-white shadow-sm' : 'text-amber-400 hover:text-amber-200'
+                  }`}
+                >
+                  <Settings size={13} />
+                  管理設定
+                </button>
+              )}
             </div>
           </div>
 
           <div className="flex items-center gap-2 text-xs text-gray-400">
             <span>ロール: <strong className={userRole === 'teacher' ? 'text-amber-400' : 'text-indigo-400'}>
-              {userRole === 'teacher' ? '教員' : '受講生'}
+              {userRole === 'teacher' ? '教員（全権限管理者）' : '受講生'}
             </strong></span>
           </div>
         </div>
 
+        {/* 1. 投稿タブ */}
         {currentTab === 'posts' && (
           <div className="flex-1 flex flex-col overflow-hidden">
             <div className="flex-1 p-6 overflow-y-auto space-y-4">
@@ -647,7 +810,7 @@ export default function App() {
                       handleSendMessage(e);
                     }
                   }}
-                  placeholder={`#${activeChannel} にメッセージを送信... (Enterで送信, Shift+Enterで改行)`}
+                  placeholder={`#${channels.find(c => c.id === activeChannel)?.name || activeChannel} にメッセージを送信...`}
                   className="w-full bg-transparent p-3 text-sm text-white focus:outline-none resize-none placeholder-gray-500"
                 />
 
@@ -688,6 +851,7 @@ export default function App() {
           </div>
         )}
 
+        {/* 2. ファイルタブ */}
         {currentTab === 'files' && (
           <div className="flex-1 p-8 overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
@@ -718,6 +882,7 @@ export default function App() {
           </div>
         )}
 
+        {/* 3. 課題タブ */}
         {currentTab === 'assignments' && (
           <div className="flex-1 p-8 overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
@@ -727,7 +892,7 @@ export default function App() {
                   課題一覧
                 </h2>
                 <p className="text-xs text-gray-400 mt-1">
-                  {userRole === 'teacher' ? '教員用：課題の作成・提出状況の確認が行えます' : '生徒用：課題の確認と提出が行えます（期日前なら取り下げ可能）'}
+                  {userRole === 'teacher' ? '教員用：課題の作成・編集・削除、提出物の採点が行えます' : '生徒用：課題の確認、提出および期限前の取り下げが行えます'}
                 </p>
               </div>
 
@@ -742,25 +907,41 @@ export default function App() {
               )}
             </div>
 
+            {/* 新規課題作成モーダル */}
             {showCreateModal && (
               <div className="mb-6 p-5 bg-[#252525] border border-[#3b3a39] rounded-lg">
                 <h3 className="text-sm font-semibold text-white mb-3">新しい課題を作成</h3>
                 <form onSubmit={handleCreateAssignment} className="space-y-3">
-                  <div>
-                    <label className="text-[11px] text-gray-400 block mb-1">課題タイトル</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="例: 第4回 計算機システム課題"
-                      value={newTitle}
-                      onChange={(e) => setNewTitle(e.target.value)}
-                      className="w-full bg-[#1e1e1e] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
-                    />
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[11px] text-gray-400 block mb-1">課題タイトル</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="例: 第4回 計算機システム課題"
+                        value={newTitle}
+                        onChange={(e) => setNewTitle(e.target.value)}
+                        className="w-full bg-[#1e1e1e] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-gray-400 block mb-1">対象チャンネル</label>
+                      <select
+                        value={newAsgChannel}
+                        onChange={(e) => setNewAsgChannel(e.target.value)}
+                        className="w-full bg-[#1e1e1e] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                      >
+                        {channels.map((c) => (
+                          <option key={c.id} value={c.id}>#{c.name}</option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
+
                   <div>
                     <label className="text-[11px] text-gray-400 flex items-center gap-1.5 mb-1">
                       <Calendar size={13} className="text-indigo-400" />
-                      提出期限（カレンダーから選択）
+                      提出期限
                     </label>
                     <input
                       type="datetime-local"
@@ -771,6 +952,7 @@ export default function App() {
                       className="w-full bg-[#1e1e1e] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
                     />
                   </div>
+
                   <div>
                     <label className="text-[11px] text-gray-400 block mb-1">詳細・指示内容</label>
                     <textarea
@@ -781,6 +963,7 @@ export default function App() {
                       className="w-full bg-[#1e1e1e] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500 resize-none"
                     />
                   </div>
+
                   <div className="flex gap-2 justify-end pt-1">
                     <button
                       type="button"
@@ -800,6 +983,63 @@ export default function App() {
               </div>
             )}
 
+            {/* 課題編集モーダル */}
+            {editingAssignment && (
+              <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                <div className="w-full max-w-lg bg-[#242427] border border-[#3f3f46] rounded-xl p-6 shadow-2xl">
+                  <h3 className="text-sm font-semibold text-white mb-4">課題の編集</h3>
+                  <form onSubmit={handleSaveEditAssignment} className="space-y-3">
+                    <div>
+                      <label className="text-[11px] text-gray-400 block mb-1">タイトル</label>
+                      <input
+                        type="text"
+                        required
+                        value={editingAssignment.title}
+                        onChange={(e) => setEditingAssignment({ ...editingAssignment, title: e.target.value })}
+                        className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-gray-400 block mb-1">提出期限</label>
+                      <input
+                        type="datetime-local"
+                        required
+                        value={editingAssignment.dueDate}
+                        onChange={(e) => setEditingAssignment({ ...editingAssignment, dueDate: e.target.value })}
+                        style={{ colorScheme: 'dark' }}
+                        className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-gray-400 block mb-1">詳細説明</label>
+                      <textarea
+                        rows={3}
+                        value={editingAssignment.description}
+                        onChange={(e) => setEditingAssignment({ ...editingAssignment, description: e.target.value })}
+                        className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500 resize-none"
+                      />
+                    </div>
+                    <div className="flex gap-2 justify-end pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditingAssignment(null)}
+                        className="px-3 py-1.5 text-xs text-gray-400 hover:text-white border border-gray-600 rounded"
+                      >
+                        キャンセル
+                      </button>
+                      <button
+                        type="submit"
+                        className="px-4 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium"
+                      >
+                        変更を保存
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {/* 課題カード一覧 */}
             <div className="space-y-4">
               {assignments.map((asg) => {
                 const mySubmission = asg.submissions.find((s) => s.studentName === displayUserName);
@@ -810,11 +1050,32 @@ export default function App() {
                   <div key={asg.id} className="p-5 bg-[#252526] border border-[#383838] rounded-lg">
                     <div className="flex items-start justify-between">
                       <div>
-                        <span className="text-[10px] text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20 font-medium">
-                          #{asg.channel}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20 font-medium">
+                            #{channels.find(c => c.id === asg.channel)?.name || asg.channel}
+                          </span>
+                          {userRole === 'teacher' && (
+                            <div className="flex items-center gap-1.5 ml-2">
+                              <button
+                                onClick={() => setEditingAssignment(asg)}
+                                className="text-gray-400 hover:text-white transition p-1"
+                                title="課題を編集"
+                              >
+                                <Edit2 size={13} />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteAssignment(asg.id, asg.title)}
+                                className="text-gray-400 hover:text-red-400 transition p-1"
+                                title="課題を削除"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
                         <h3 className="text-sm font-semibold text-white mt-1">{asg.title}</h3>
                       </div>
+
                       <div className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded ${
                         isPastDue ? 'bg-red-950/40 text-red-300 border border-red-500/30' : 'bg-[#1f1f1f] text-gray-300 border border-gray-700'
                       }`}>
@@ -828,6 +1089,7 @@ export default function App() {
                       {asg.description}
                     </p>
 
+                    {/* 生徒視点：提出 & 取り下げ & 採点確認 */}
                     {userRole === 'student' && (
                       <div className="mt-4 pt-4 border-t border-[#333]">
                         {isSubmitted ? (
@@ -855,9 +1117,23 @@ export default function App() {
                                 </span>
                               )}
                             </div>
+
                             <p className="text-xs text-gray-300 bg-[#191919] p-2.5 rounded border border-[#2e2e2e] leading-relaxed">
                               {mySubmission.content}
                             </p>
+
+                            {/* 教員からの評価・採点がある場合 */}
+                            {(mySubmission.score || mySubmission.feedback) && (
+                              <div className="mt-2 p-2.5 bg-[#202020] border border-amber-500/40 rounded text-xs">
+                                <div className="font-semibold text-amber-400 flex items-center gap-1.5 mb-1">
+                                  <GraduationCap size={15} />
+                                  教員からの評価: {mySubmission.score ? `${mySubmission.score} 点` : '評価済み'}
+                                </div>
+                                {mySubmission.feedback && (
+                                  <p className="text-gray-300">{mySubmission.feedback}</p>
+                                )}
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <div className="space-y-2">
@@ -890,25 +1166,66 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* 教員視点：提出者一覧 & 採点・フィードバック */}
                     {userRole === 'teacher' && (
                       <div className="mt-4 pt-3 border-t border-[#333]">
                         <h4 className="text-xs font-semibold text-gray-300 mb-2">提出状況 ({asg.submissions.length} 件)</h4>
                         {asg.submissions.length === 0 ? (
                           <p className="text-[11px] text-gray-500">まだ提出された答案はありません。</p>
                         ) : (
-                          <div className="space-y-1.5">
-                            {asg.submissions.map((sub, idx) => (
-                              <div key={idx} className="p-2.5 bg-[#1e1e1e] rounded text-xs flex justify-between items-start border border-[#333]">
-                                <div>
-                                  <span className="font-semibold text-white">{sub.studentName}</span>
-                                  <span className="text-[10px] text-gray-500 ml-2">{sub.submittedAt}</span>
-                                  <p className="text-gray-300 mt-1">{sub.content}</p>
+                          <div className="space-y-2">
+                            {asg.submissions.map((sub, idx) => {
+                              const key = `${asg.id}-${sub.studentName}`;
+                              return (
+                                <div key={idx} className="p-3 bg-[#1e1e1e] rounded text-xs border border-[#333] space-y-2">
+                                  <div className="flex justify-between items-start">
+                                    <div>
+                                      <span className="font-semibold text-white">{sub.studentName}</span>
+                                      <span className="text-[10px] text-gray-500 ml-2">{sub.submittedAt}</span>
+                                      <p className="text-gray-300 mt-1 bg-[#161616] p-2 rounded">{sub.content}</p>
+                                    </div>
+                                    <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 shrink-0">
+                                      提出済
+                                    </span>
+                                  </div>
+
+                                  {/* 採点入力欄 */}
+                                  <div className="pt-2 border-t border-[#2a2a2a] flex items-center gap-2">
+                                    <input
+                                      type="text"
+                                      placeholder="点数 (例: 90)"
+                                      defaultValue={sub.score || ''}
+                                      onChange={(e) =>
+                                        setGradingState((prev) => ({
+                                          ...prev,
+                                          [key]: { ...prev[key], score: e.target.value, feedback: prev[key]?.feedback || sub.feedback || '' }
+                                        }))
+                                      }
+                                      className="w-24 bg-[#141414] border border-gray-700 rounded px-2 py-1 text-xs text-white"
+                                    />
+                                    <input
+                                      type="text"
+                                      placeholder="講評・フィードバック"
+                                      defaultValue={sub.feedback || ''}
+                                      onChange={(e) =>
+                                        setGradingState((prev) => ({
+                                          ...prev,
+                                          [key]: { ...prev[key], feedback: e.target.value, score: prev[key]?.score || sub.score || '' }
+                                        }))
+                                      }
+                                      className="flex-1 bg-[#141414] border border-gray-700 rounded px-2 py-1 text-xs text-white"
+                                    />
+                                    <button
+                                      onClick={() => handleGradeSubmission(asg.id, sub.studentName)}
+                                      className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white text-[11px] rounded transition flex items-center gap-1"
+                                    >
+                                      <Check size={12} />
+                                      保存
+                                    </button>
+                                  </div>
                                 </div>
-                                <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                                  提出完了
-                                </span>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         )}
                       </div>
@@ -919,7 +1236,143 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* 4. 教員専用タブ：管理設定 */}
+        {currentTab === 'settings' && userRole === 'teacher' && (
+          <div className="flex-1 p-8 overflow-y-auto space-y-6">
+            <div>
+              <h2 className="text-base font-semibold text-white flex items-center gap-2">
+                <Settings size={20} className="text-amber-400" />
+                クラスルーム総合管理設定
+              </h2>
+              <p className="text-xs text-gray-400 mt-1">
+                チームの名称変更、チャンネルの作成・削除、全課題の一括管理を行います。
+              </p>
+            </div>
+
+            {/* チーム基本設定 */}
+            <div className="p-5 bg-[#252526] border border-[#383838] rounded-lg">
+              <h3 className="text-sm font-semibold text-white mb-3">チームの基本情報</h3>
+              <div className="flex items-center gap-3">
+                <input
+                  type="text"
+                  value={teamName}
+                  onChange={(e) => setTeamName(e.target.value)}
+                  className="flex-1 max-w-md bg-[#1b1b1b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                />
+                <button
+                  onClick={() => alert('チーム名を更新しました。')}
+                  className="px-3 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium rounded transition"
+                >
+                  名称を更新
+                </button>
+              </div>
+            </div>
+
+            {/* チャンネル管理 */}
+            <div className="p-5 bg-[#252526] border border-[#383838] rounded-lg">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-white">チャンネル一覧の管理</h3>
+                <button
+                  onClick={() => setShowAddChannelModal(true)}
+                  className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs rounded transition flex items-center gap-1"
+                >
+                  <Plus size={14} />
+                  新規チャンネル追加
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                {channels.map((chan) => (
+                  <div key={chan.id} className="p-3 bg-[#1e1e1e] rounded flex items-center justify-between border border-[#333]">
+                    <div>
+                      <span className="font-semibold text-xs text-white">#{chan.name}</span>
+                      <p className="text-[11px] text-gray-400">{chan.description}</p>
+                    </div>
+                    {channels.length > 1 && (
+                      <button
+                        onClick={() => handleDeleteChannel(chan.id, chan.name)}
+                        className="text-gray-400 hover:text-red-400 p-1.5 rounded transition"
+                        title="チャンネルを削除"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 全課題サマリー */}
+            <div className="p-5 bg-[#252526] border border-[#383838] rounded-lg">
+              <h3 className="text-sm font-semibold text-white mb-3">全課題の集計サマリー</h3>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="p-3 bg-[#1e1e1e] rounded border border-[#333]">
+                  <p className="text-[11px] text-gray-400">公開中課題数</p>
+                  <p className="text-xl font-bold text-white mt-1">{assignments.length}</p>
+                </div>
+                <div className="p-3 bg-[#1e1e1e] rounded border border-[#333]">
+                  <p className="text-[11px] text-gray-400">総提出件数</p>
+                  <p className="text-xl font-bold text-emerald-400 mt-1">
+                    {assignments.reduce((acc, cur) => acc + cur.submissions.length, 0)}
+                  </p>
+                </div>
+                <div className="p-3 bg-[#1e1e1e] rounded border border-[#333]">
+                  <p className="text-[11px] text-gray-400">参加チャンネル数</p>
+                  <p className="text-xl font-bold text-indigo-400 mt-1">{channels.length}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* チャンネル新規追加モーダル */}
+      {showAddChannelModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="w-full max-w-sm bg-[#242427] border border-[#3f3f46] rounded-xl p-6 shadow-2xl">
+            <h3 className="text-sm font-semibold text-white mb-3">新規チャンネルを作成</h3>
+            <form onSubmit={handleAddChannel} className="space-y-3">
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1">チャンネル名</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="例: 期末演習プロジェクト"
+                  value={newChannelName}
+                  onChange={(e) => setNewChannelName(e.target.value)}
+                  className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1">説明（任意）</label>
+                <input
+                  type="text"
+                  placeholder="チャンネルの目的を入力"
+                  value={newChannelDesc}
+                  onChange={(e) => setNewChannelDesc(e.target.value)}
+                  className="w-full bg-[#18181b] border border-gray-700 rounded p-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+              <div className="flex gap-2 justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddChannelModal(false)}
+                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-white border border-gray-600 rounded"
+                >
+                  キャンセル
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium"
+                >
+                  作成
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
