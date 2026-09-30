@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ID, Query, Models } from 'appwrite';
+import { ID, Query } from 'appwrite';
+import type { Models } from 'appwrite';
 import { 
   client, 
   databases, 
@@ -30,11 +31,15 @@ import {
   Download,
   X,
   LogOut,
-  UserCheck,
   Lock,
   Mail,
   User
 } from 'lucide-react';
+
+// ユーザー設定のカスタム型定義
+interface UserPrefs extends Models.Preferences {
+  role?: 'student' | 'teacher';
+}
 
 interface ChatMessage {
   $id: string;
@@ -69,7 +74,7 @@ interface Assignment {
 
 export default function App() {
   // 認証関連ステート
-  const [currentUser, setCurrentUser] = useState<Models.User<Models.Preferences> | null>(null);
+  const [currentUser, setCurrentUser] = useState<Models.User<UserPrefs> | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
@@ -126,7 +131,7 @@ export default function App() {
   const checkLoggedInUser = async () => {
     try {
       setAuthLoading(true);
-      const user = await account.get();
+      const user = await account.get<UserPrefs>();
       setCurrentUser(user);
     } catch {
       setCurrentUser(null);
@@ -155,7 +160,7 @@ export default function App() {
       await account.create(ID.unique(), authEmail, authPassword, authName);
       await account.createEmailPasswordSession(authEmail, authPassword);
       // ロール情報を Preferences に保存
-      await account.updatePrefs({ role: authRole });
+      await account.updatePrefs<UserPrefs>({ role: authRole });
       await checkLoggedInUser();
     } catch (err: any) {
       setAuthError(err.message || 'アカウント作成に失敗しました。');
@@ -174,8 +179,8 @@ export default function App() {
     }
   };
 
-  // ログイン中ユーザーのロール取得
-  const userRole = (currentUser?.prefs?.role as 'teacher' | 'student') || 'student';
+  // ログイン中ユーザー情報
+  const userRole: 'student' | 'teacher' = currentUser?.prefs?.role === 'teacher' ? 'teacher' : 'student';
   const displayUserName = currentUser?.name || '匿名ユーザー';
 
   // 2. メッセージ取得 & Realtime購読（ログイン時のみ）
