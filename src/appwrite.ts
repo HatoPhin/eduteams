@@ -11,4 +11,4 @@ export const storage = new Storage(client);
 
 export const DB_ID = '6abd0103001c6c5b7969';
 export const MESSAGES_COLLECTION_ID = '6abd0163003b4a8a779a';
-export const STORAGE_BUCKET_ID = 'attachments'; // 作成したバケットID
+export const STORAGE_BUCKET_ID = '6abd18030025bc03124f'; // ←ここに実際の英数字IDを貼り付け
