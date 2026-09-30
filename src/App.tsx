@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ID, Query } from 'appwrite';
+import { ID, Query, Models } from 'appwrite';
 import { 
   client, 
   databases, 
   storage,
+  account,
   DB_ID, 
   MESSAGES_COLLECTION_ID,
   STORAGE_BUCKET_ID
@@ -27,7 +28,12 @@ import {
   AlertCircle,
   RotateCcw,
   Download,
-  X
+  X,
+  LogOut,
+  UserCheck,
+  Lock,
+  Mail,
+  User
 } from 'lucide-react';
 
 interface ChatMessage {
@@ -62,23 +68,29 @@ interface Assignment {
 }
 
 export default function App() {
+  // 認証関連ステート
+  const [currentUser, setCurrentUser] = useState<Models.User<Models.Preferences> | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authRole, setAuthRole] = useState<'student' | 'teacher'>('student');
+  const [authError, setAuthError] = useState('');
+
+  // アプリUI・ナビゲーション
   const [currentNav, setCurrentNav] = useState<'chat' | 'teams' | 'assignments'>('teams');
   const [currentTab, setCurrentTab] = useState<'posts' | 'files' | 'assignments'>('posts');
-  
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputContent, setInputContent] = useState('');
   const [activeChannel, setActiveChannel] = useState('general');
-  const [currentRole, setCurrentRole] = useState<'student' | 'teacher'>('student');
-  const [userName, setUserName] = useState('生徒A');
   const [loading, setLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // ファイル添付ステート
+  // ファイル添付
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // ファイル一覧タブ用のステート
   const [sharedFiles, setSharedFiles] = useState<SharedFileItem[]>([
     {
       id: 'mock-1',
@@ -89,7 +101,7 @@ export default function App() {
     }
   ]);
 
-  // 課題ステート
+  // 課題
   const [assignments, setAssignments] = useState<Assignment[]>([
     {
       id: 'asg-1',
@@ -106,7 +118,69 @@ export default function App() {
   const [newDesc, setNewDesc] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
 
+  // 1. 初回ログイン状態チェック
   useEffect(() => {
+    checkLoggedInUser();
+  }, []);
+
+  const checkLoggedInUser = async () => {
+    try {
+      setAuthLoading(true);
+      const user = await account.get();
+      setCurrentUser(user);
+    } catch {
+      setCurrentUser(null);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  // ログイン処理
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      await account.createEmailPasswordSession(authEmail, authPassword);
+      await checkLoggedInUser();
+    } catch (err: any) {
+      setAuthError(err.message || 'ログインに失敗しました。メールアドレスとパスワードを確認してください。');
+    }
+  };
+
+  // アカウント新規登録処理
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      await account.create(ID.unique(), authEmail, authPassword, authName);
+      await account.createEmailPasswordSession(authEmail, authPassword);
+      // ロール情報を Preferences に保存
+      await account.updatePrefs({ role: authRole });
+      await checkLoggedInUser();
+    } catch (err: any) {
+      setAuthError(err.message || 'アカウント作成に失敗しました。');
+    }
+  };
+
+  // ログアウト処理
+  const handleLogout = async () => {
+    if (!confirm('ログアウトしますか？')) return;
+    try {
+      await account.deleteSession('current');
+      setCurrentUser(null);
+      setMessages([]);
+    } catch (err) {
+      console.error('ログアウトエラー:', err);
+    }
+  };
+
+  // ログイン中ユーザーのロール取得
+  const userRole = (currentUser?.prefs?.role as 'teacher' | 'student') || 'student';
+  const displayUserName = currentUser?.name || '匿名ユーザー';
+
+  // 2. メッセージ取得 & Realtime購読（ログイン時のみ）
+  useEffect(() => {
+    if (!currentUser) return;
     setLoading(true);
 
     databases.listDocuments(DB_ID, MESSAGES_COLLECTION_ID, [
@@ -139,7 +213,7 @@ export default function App() {
     return () => {
       unsubscribe();
     };
-  }, [activeChannel]);
+  }, [activeChannel, currentUser]);
 
   useEffect(() => {
     if (currentTab === 'posts') {
@@ -147,7 +221,7 @@ export default function App() {
     }
   }, [messages, currentTab]);
 
-  // メッセージ送信（ファイル添付対応）
+  // メッセージ送信処理
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputContent.trim() && !selectedFile) return;
@@ -156,7 +230,6 @@ export default function App() {
     let finalContent = inputContent.trim();
 
     try {
-      // ファイルが選択されている場合は Storage にアップロード
       if (selectedFile) {
         const uploaded = await storage.createFile(
           STORAGE_BUCKET_ID,
@@ -164,12 +237,10 @@ export default function App() {
           selectedFile
         );
 
-        // Appwrite Storage のダウンロードURLを生成
         const fileUrl = storage.getFileDownload(STORAGE_BUCKET_ID, uploaded.$id);
         const fileTag = `\n📎 添付ファイル: [${selectedFile.name}](${fileUrl})`;
         finalContent = finalContent ? `${finalContent}\n${fileTag}` : fileTag;
 
-        // ファイルタブにも反映
         setSharedFiles((prev) => [
           {
             id: uploaded.$id,
@@ -193,20 +264,21 @@ export default function App() {
         ID.unique(),
         {
           content: finalContent,
-          sender_name: userName,
-          sender_role: currentRole,
+          sender_name: displayUserName,
+          sender_role: userRole,
           channel_id: activeChannel,
           reply_count: 0
         }
       );
     } catch (err) {
-      console.error('送信またはファイル保存エラー:', err);
-      alert('送信に失敗しました。Appwrite Storage のバケット設定・権限を確認してください。');
+      console.error('送信エラー:', err);
+      alert('メッセージの送信に失敗しました。');
     } finally {
       setUploading(false);
     }
   };
 
+  // 課題作成（教員用）
   const handleCreateAssignment = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim() || !newDueDate.trim()) return;
@@ -227,6 +299,7 @@ export default function App() {
     setShowCreateModal(false);
   };
 
+  // 課題提出（生徒用）
   const handleSubmitAssignment = (assignmentId: string, dueDate: string) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため提出できません。');
@@ -242,13 +315,13 @@ export default function App() {
     setAssignments((prev) =>
       prev.map((asg) => {
         if (asg.id === assignmentId) {
-          const filtered = asg.submissions.filter((s) => s.studentName !== userName);
+          const filtered = asg.submissions.filter((s) => s.studentName !== displayUserName);
           return {
             ...asg,
             submissions: [
               ...filtered,
               {
-                studentName: userName,
+                studentName: displayUserName,
                 submittedAt: new Date().toLocaleString('ja-JP', { hour12: false }),
                 content: text
               }
@@ -263,6 +336,7 @@ export default function App() {
     alert('課題を提出しました！');
   };
 
+  // 課題取り下げ
   const handleCancelSubmission = (assignmentId: string, dueDate: string, previousContent: string) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため取り下げはできません。');
@@ -276,7 +350,7 @@ export default function App() {
         if (asg.id === assignmentId) {
           return {
             ...asg,
-            submissions: asg.submissions.filter((s) => s.studentName !== userName)
+            submissions: asg.submissions.filter((s) => s.studentName !== displayUserName)
           };
         }
         return asg;
@@ -293,7 +367,6 @@ export default function App() {
     return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
-  // メッセージ中の添付URLをパースしてリンク化
   const renderMessageContent = (text: string) => {
     const fileRegex = /📎 添付ファイル: \[(.+?)\]\((.+?)\)/g;
     const parts = [];
@@ -329,6 +402,135 @@ export default function App() {
     return parts;
   };
 
+  // 認証確認中のロード画面
+  if (authLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#1f1f1f] text-gray-300">
+        <div className="text-sm flex items-center gap-2">
+          <Clock className="animate-spin text-indigo-400" size={18} />
+          ログイン状態を確認中...
+        </div>
+      </div>
+    );
+  }
+
+  // 未ログイン時：ログイン／新規登録画面
+  if (!currentUser) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#18181b] text-gray-200 font-sans p-4">
+        <div className="w-full max-w-md bg-[#242427] border border-[#3f3f46] rounded-xl p-8 shadow-2xl">
+          <div className="flex flex-col items-center mb-6">
+            <div className="w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center font-bold text-white text-xl shadow-lg mb-3">
+              ET
+            </div>
+            <h1 className="text-lg font-bold tracking-wide text-white">EduTeams ログイン</h1>
+            <p className="text-xs text-gray-400 mt-1">講義・演習コラボレーションシステム</p>
+          </div>
+
+          {authError && (
+            <div className="mb-4 p-3 bg-red-950/40 border border-red-500/40 text-red-300 rounded text-xs leading-relaxed">
+              {authError}
+            </div>
+          )}
+
+          <form onSubmit={isRegisterMode ? handleRegister : handleLogin} className="space-y-4">
+            {isRegisterMode && (
+              <>
+                <div>
+                  <label className="text-xs text-gray-300 font-medium block mb-1">氏名 / ニックネーム</label>
+                  <div className="relative">
+                    <User size={15} className="absolute left-3 top-3 text-gray-400" />
+                    <input
+                      type="text"
+                      required
+                      placeholder="例: 山田 太郎"
+                      value={authName}
+                      onChange={(e) => setAuthName(e.target.value)}
+                      className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-300 font-medium block mb-1">登録ロール</label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAuthRole('student')}
+                      className={`flex-1 py-2 text-xs rounded-lg border font-medium transition ${
+                        authRole === 'student' ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-gray-700 text-gray-400'
+                      }`}
+                    >
+                      生徒 / 受講生
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAuthRole('teacher')}
+                      className={`flex-1 py-2 text-xs rounded-lg border font-medium transition ${
+                        authRole === 'teacher' ? 'bg-amber-600 border-amber-500 text-white' : 'border-gray-700 text-gray-400'
+                      }`}
+                    >
+                      教員 / TA
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            <div>
+              <label className="text-xs text-gray-300 font-medium block mb-1">メールアドレス</label>
+              <div className="relative">
+                <Mail size={15} className="absolute left-3 top-3 text-gray-400" />
+                <input
+                  type="email"
+                  required
+                  placeholder="user@example.com"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-300 font-medium block mb-1">パスワード</label>
+              <div className="relative">
+                <Lock size={15} className="absolute left-3 top-3 text-gray-400" />
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  placeholder="8文字以上"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  className="w-full bg-[#18181b] border border-gray-700 rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition shadow-md mt-2"
+            >
+              {isRegisterMode ? '新規アカウントを作成してログイン' : 'サインイン'}
+            </button>
+          </form>
+
+          <div className="mt-5 text-center">
+            <button
+              type="button"
+              onClick={() => { setIsRegisterMode(!isRegisterMode); setAuthError(''); }}
+              className="text-xs text-indigo-400 hover:text-indigo-300 font-medium transition"
+            >
+              {isRegisterMode ? 'アカウントを既にお持ちの方はこちら (ログイン)' : 'アカウントをお持ちでない方はこちら (新規登録)'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ログイン後のメイン画面
   return (
     <div className="flex h-screen bg-[#1f1f1f] text-gray-200 select-none font-sans overflow-hidden">
       {/* 最左端：アプリアイコンバー */}
@@ -367,7 +569,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* 左サイドバー：チャンネル一覧 */}
+      {/* 左サイドバー：チャンネル一覧 & アカウント情報 */}
       <div className="w-64 bg-[#2b2b2b] flex flex-col border-r border-[#383838] shrink-0">
         <div className="h-14 px-4 flex items-center justify-between border-b border-[#383838]">
           <span className="font-semibold text-sm tracking-wide">情報通信工学 演習</span>
@@ -395,27 +597,26 @@ export default function App() {
           </button>
         </div>
 
-        {/* ロール切り替え */}
-        <div className="mt-auto p-3 border-t border-[#383838] bg-[#242424]">
-          <span className="text-[11px] text-gray-400 block mb-2 font-medium">ロール切り替え</span>
-          <div className="flex gap-2">
-            <button
-              onClick={() => { setCurrentRole('student'); setUserName('生徒A'); }}
-              className={`flex-1 py-1.5 text-xs rounded border transition ${
-                currentRole === 'student' ? 'bg-indigo-600 border-indigo-500 text-white font-medium' : 'border-gray-600 text-gray-400'
-              }`}
-            >
-              生徒
-            </button>
-            <button
-              onClick={() => { setCurrentRole('teacher'); setUserName('担当教員'); }}
-              className={`flex-1 py-1.5 text-xs rounded border transition ${
-                currentRole === 'teacher' ? 'bg-amber-600 border-amber-500 text-white font-medium' : 'border-gray-600 text-gray-400'
-              }`}
-            >
-              教員
-            </button>
+        {/* ユーザーアカウント & ログアウト */}
+        <div className="mt-auto p-3 border-t border-[#383838] bg-[#242424] flex items-center justify-between">
+          <div className="flex items-center gap-2 overflow-hidden">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${
+              userRole === 'teacher' ? 'bg-amber-600 text-white' : 'bg-indigo-600 text-white'
+            }`}>
+              {userRole === 'teacher' ? <GraduationCap size={15} /> : displayUserName.slice(0, 2)}
+            </div>
+            <div className="overflow-hidden">
+              <p className="text-xs font-medium text-white truncate">{displayUserName}</p>
+              <p className="text-[10px] text-gray-400 truncate">{currentUser.email}</p>
+            </div>
           </div>
+          <button
+            onClick={handleLogout}
+            title="ログアウト"
+            className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-[#333] rounded transition"
+          >
+            <LogOut size={16} />
+          </button>
         </div>
       </div>
 
@@ -431,7 +632,6 @@ export default function App() {
               </h1>
             </div>
 
-            {/* Teams上部タブ */}
             <div className="flex items-center gap-1">
               <button
                 onClick={() => setCurrentTab('posts')}
@@ -461,7 +661,9 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 text-xs text-gray-400">
-            <span>ログイン: <strong className="text-white">{userName}</strong> ({currentRole === 'teacher' ? '教員' : '生徒'})</span>
+            <span>ロール: <strong className={userRole === 'teacher' ? 'text-amber-400' : 'text-indigo-400'}>
+              {userRole === 'teacher' ? '教員' : '受講生'}
+            </strong></span>
           </div>
         </div>
 
@@ -501,9 +703,7 @@ export default function App() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* 投稿入力欄 */}
             <div className="p-4 bg-[#242424] border-t border-[#2d2c2c]">
-              {/* 添付ファイルプレビュー */}
               {selectedFile && (
                 <div className="mb-2 p-2 bg-[#1b1b1b] border border-indigo-500/50 rounded flex items-center justify-between">
                   <div className="flex items-center gap-2 text-xs text-indigo-300">
@@ -535,7 +735,6 @@ export default function App() {
                   className="w-full bg-transparent p-3 text-sm text-white focus:outline-none resize-none placeholder-gray-500"
                 />
 
-                {/* 隠しファイルインプット */}
                 <input
                   type="file"
                   ref={fileInputRef}
@@ -614,11 +813,11 @@ export default function App() {
                   課題一覧
                 </h2>
                 <p className="text-xs text-gray-400 mt-1">
-                  {currentRole === 'teacher' ? '教員用：課題の作成・提出状況の確認が行えます' : '生徒用：課題の確認と提出が行えます（期日前なら取り下げ可能）'}
+                  {userRole === 'teacher' ? '教員用：課題の作成・提出状況の確認が行えます' : '生徒用：課題の確認と提出が行えます（期日前なら取り下げ可能）'}
                 </p>
               </div>
 
-              {currentRole === 'teacher' && (
+              {userRole === 'teacher' && (
                 <button
                   onClick={() => setShowCreateModal(true)}
                   className="flex items-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-md transition shadow"
@@ -689,7 +888,7 @@ export default function App() {
 
             <div className="space-y-4">
               {assignments.map((asg) => {
-                const mySubmission = asg.submissions.find((s) => s.studentName === userName);
+                const mySubmission = asg.submissions.find((s) => s.studentName === displayUserName);
                 const isSubmitted = !!mySubmission;
                 const isPastDue = new Date().getTime() > new Date(asg.dueDate).getTime();
 
@@ -715,7 +914,7 @@ export default function App() {
                       {asg.description}
                     </p>
 
-                    {currentRole === 'student' && (
+                    {userRole === 'student' && (
                       <div className="mt-4 pt-4 border-t border-[#333]">
                         {isSubmitted ? (
                           <div className="bg-emerald-950/30 border border-emerald-500/40 p-3.5 rounded-md flex flex-col gap-2">
@@ -777,7 +976,7 @@ export default function App() {
                       </div>
                     )}
 
-                    {currentRole === 'teacher' && (
+                    {userRole === 'teacher' && (
                       <div className="mt-4 pt-3 border-t border-[#333]">
                         <h4 className="text-xs font-semibold text-gray-300 mb-2">提出状況 ({asg.submissions.length} 件)</h4>
                         {asg.submissions.length === 0 ? (
