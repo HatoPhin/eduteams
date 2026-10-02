@@ -8,7 +8,9 @@ import {
   account,
   DB_ID, 
   MESSAGES_COLLECTION_ID,
-  STORAGE_BUCKET_ID
+  STORAGE_BUCKET_ID,
+  CHANNELS_COLLECTION_ID,
+  ASSIGNMENTS_COLLECTION_ID
 } from './appwrite';
 import { 
   MessageSquare, 
@@ -87,6 +89,45 @@ interface Assignment {
   submissions: Submission[];
 }
 
+const DEFAULT_CHANNELS = [
+  { name: '一般（講義連絡）', description: '講義全体の連絡・お知らせ' },
+  { name: '質問・相談', description: '課題や講義内容に関する質疑応答' },
+  { name: '演習・実験実習', description: '環境構築や演習の進行' }
+];
+
+const parseSubmissions = (raw: unknown): Submission[] => {
+  if (typeof raw !== 'string' || !raw) return [];
+  try {
+    return JSON.parse(raw) as Submission[];
+  } catch {
+    return [];
+  }
+};
+
+const sortDocs = (docs: any[]) =>
+  [...docs].sort(
+    (a, b) =>
+      (a.order ?? 0) - (b.order ?? 0) ||
+      new Date(a.$createdAt).getTime() - new Date(b.$createdAt).getTime()
+  );
+
+const toChannel = (d: any): ChannelItem => ({
+  id: d.$id,
+  name: d.name,
+  description: d.description || ''
+});
+
+const toAssignment = (d: any): Assignment => ({
+  id: d.$id,
+  title: d.title,
+  dueDate: d.dueDate,
+  description: d.description || '',
+  channel: d.channelId || '',
+  attachmentName: d.attachmentName || undefined,
+  attachmentUrl: d.attachmentUrl || undefined,
+  submissions: parseSubmissions(d.submissions)
+});
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<Models.User<UserPrefs> | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -100,12 +141,8 @@ export default function App() {
   
   // チーム・チャンネル
   const [teamName, setTeamName] = useState('情報通信工学 演習クラス');
-  const [channels, setChannels] = useState<ChannelItem[]>([
-    { id: 'general', name: '一般（講義連絡）', description: '講義全体の連絡・お知らせ' },
-    { id: 'questions', name: '質問・相談', description: '課題や講義内容に関する質疑応答' },
-    { id: 'lab', name: '演習・実験実習', description: '環境構築や演習の進行' }
-  ]);
-  const [activeChannel, setActiveChannel] = useState('general');
+  const [channels, setChannels] = useState<ChannelItem[]>([]);
+  const [activeChannel, setActiveChannel] = useState('');
   const [newChannelName, setNewChannelName] = useState('');
   const [newChannelDesc, setNewChannelDesc] = useState('');
   const [showAddChannelModal, setShowAddChannelModal] = useState(false);
@@ -131,18 +168,7 @@ export default function App() {
   ]);
 
   // 課題
-  const [assignments, setAssignments] = useState<Assignment[]>([
-    {
-      id: 'asg-1',
-      title: '第3回：情報通信プロトコルの考察レポート',
-      dueDate: '2026-10-15T23:59',
-      description: '講義で扱ったトランスポート層（TCP/UDP）の特性差と、リアルタイム通信で求められる要件について論じなさい。指定の配布フォーマットに従って記述してください。',
-      channel: 'general',
-      attachmentName: 'レポート指定フォーマット.docx',
-      attachmentUrl: '#',
-      submissions: []
-    }
-  ]);
+  const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [submissionText, setSubmissionText] = useState<{ [key: string]: string }>({});
   
   // 課題作成モーダル用ステート
@@ -150,7 +176,7 @@ export default function App() {
   const [newTitle, setNewTitle] = useState('');
   const [newDueDate, setNewDueDate] = useState('');
   const [newDesc, setNewDesc] = useState('');
-  const [newAsgChannel, setNewAsgChannel] = useState('general');
+  const [newAsgChannel, setNewAsgChannel] = useState('');
   const [newAsgFile, setNewAsgFile] = useState<File | null>(null);
   const [asgUploading, setAsgUploading] = useState(false);
   const asgFileInputRef = useRef<HTMLInputElement>(null);
@@ -204,9 +230,70 @@ export default function App() {
   const userRole: 'student' | 'teacher' = currentUser?.prefs?.role === 'teacher' ? 'teacher' : 'student';
   const displayUserName = currentUser?.name || '受講生';
 
-  // メッセージ購読
+  // チャンネル・課題の読み込み (Appwrite)
+  const seededRef = useRef(false);
+
+  const loadChannels = async () => {
+    try {
+      const res = await databases.listDocuments(DB_ID, CHANNELS_COLLECTION_ID, [Query.limit(100)]);
+      if (res.documents.length === 0 && userRole === 'teacher' && !seededRef.current) {
+        seededRef.current = true;
+        for (let i = 0; i < DEFAULT_CHANNELS.length; i++) {
+          await databases.createDocument(DB_ID, CHANNELS_COLLECTION_ID, ID.unique(), {
+            ...DEFAULT_CHANNELS[i],
+            order: i
+          });
+        }
+        return loadChannels();
+      }
+      setChannels(sortDocs(res.documents).map(toChannel));
+    } catch (err) {
+      console.error('チャンネル取得エラー:', err);
+    }
+  };
+
+  const loadAssignments = async () => {
+    try {
+      const res = await databases.listDocuments(DB_ID, ASSIGNMENTS_COLLECTION_ID, [Query.limit(100)]);
+      const list = res.documents.map(toAssignment);
+      list.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+      setAssignments(list);
+    } catch (err) {
+      console.error('課題取得エラー:', err);
+    }
+  };
+
   useEffect(() => {
     if (!currentUser) return;
+    loadChannels();
+    loadAssignments();
+
+    const unsubChannels = client.subscribe(
+      `databases.${DB_ID}.collections.${CHANNELS_COLLECTION_ID}.documents`,
+      () => { loadChannels(); }
+    );
+    const unsubAssignments = client.subscribe(
+      `databases.${DB_ID}.collections.${ASSIGNMENTS_COLLECTION_ID}.documents`,
+      () => { loadAssignments(); }
+    );
+
+    return () => {
+      unsubChannels();
+      unsubAssignments();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser]);
+
+  // 選択中チャンネルが存在しない場合は先頭チャンネルへ
+  useEffect(() => {
+    if (channels.length > 0 && !channels.some((c) => c.id === activeChannel)) {
+      setActiveChannel(channels[0].id);
+    }
+  }, [channels, activeChannel]);
+
+  // メッセージ購読
+  useEffect(() => {
+    if (!currentUser || !activeChannel) return;
     setLoading(true);
 
     databases.listDocuments(DB_ID, MESSAGES_COLLECTION_ID, [
@@ -304,6 +391,16 @@ export default function App() {
     }
   };
 
+  // 提出物(JSON)の更新: 直前に最新を取得して書き込み、同時更新の取りこぼしを減らす
+  const mutateSubmissions = async (id: string, fn: (subs: Submission[]) => Submission[]) => {
+    const fresh = await databases.getDocument(DB_ID, ASSIGNMENTS_COLLECTION_ID, id);
+    const next = fn(parseSubmissions((fresh as any).submissions));
+    await databases.updateDocument(DB_ID, ASSIGNMENTS_COLLECTION_ID, id, {
+      submissions: JSON.stringify(next)
+    });
+    await loadAssignments();
+  };
+
   // 課題作成 (教員・ファイル添付対応)
   const handleCreateAssignment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -336,18 +433,19 @@ export default function App() {
         ]);
       }
 
-      const newAssignment: Assignment = {
-        id: `asg-${Date.now()}`,
+      await databases.createDocument(DB_ID, ASSIGNMENTS_COLLECTION_ID, ID.unique(), {
         title: newTitle,
         dueDate: newDueDate,
         description: newDesc,
-        channel: newAsgChannel,
-        attachmentName: attachedName,
-        attachmentUrl: attachedUrl,
-        submissions: []
-      };
+        channelId: newAsgChannel || activeChannel,
+        attachmentName: attachedName ?? '',
+        attachmentUrl: attachedUrl ?? '',
+        attachmentIds: [],
+        submissions: '[]',
+        createdBy: currentUser?.$id ?? ''
+      });
+      await loadAssignments();
 
-      setAssignments((prev) => [newAssignment, ...prev]);
       setNewTitle('');
       setNewDueDate('');
       setNewDesc('');
@@ -356,7 +454,7 @@ export default function App() {
       setShowCreateModal(false);
     } catch (err) {
       console.error('課題作成・ファイルアップロードエラー:', err);
-      alert('配布ファイルのアップロードに失敗しました。');
+      alert('課題の作成に失敗しました。');
     } finally {
       setAsgUploading(false);
     }
@@ -370,8 +468,8 @@ export default function App() {
     let attachedName = editingAssignment.attachmentName;
     let attachedUrl = editingAssignment.attachmentUrl;
 
-    if (editAsgFile) {
-      try {
+    try {
+      if (editAsgFile) {
         const uploaded = await storage.createFile(
           STORAGE_BUCKET_ID,
           ID.unique(),
@@ -379,32 +477,40 @@ export default function App() {
         );
         attachedName = editAsgFile.name;
         attachedUrl = storage.getFileDownload(STORAGE_BUCKET_ID, uploaded.$id).toString();
-      } catch (err) {
-        console.error('編集ファイルアップロードエラー:', err);
-        alert('ファイルの更新に失敗しました。');
-        return;
       }
-    }
 
-    setAssignments((prev) =>
-      prev.map((asg) => 
-        asg.id === editingAssignment.id 
-          ? { ...editingAssignment, attachmentName: attachedName, attachmentUrl: attachedUrl } 
-          : asg
-      )
-    );
-    setEditingAssignment(null);
-    setEditAsgFile(null);
+      // submissions は上書きしない (生徒の提出を消さないため)
+      await databases.updateDocument(DB_ID, ASSIGNMENTS_COLLECTION_ID, editingAssignment.id, {
+        title: editingAssignment.title,
+        dueDate: editingAssignment.dueDate,
+        description: editingAssignment.description,
+        channelId: editingAssignment.channel,
+        attachmentName: attachedName ?? '',
+        attachmentUrl: attachedUrl ?? ''
+      });
+      await loadAssignments();
+      setEditingAssignment(null);
+      setEditAsgFile(null);
+    } catch (err) {
+      console.error('課題編集エラー:', err);
+      alert('課題の更新に失敗しました。');
+    }
   };
 
   // 課題削除 (教員)
-  const handleDeleteAssignment = (id: string, title: string) => {
+  const handleDeleteAssignment = async (id: string, title: string) => {
     if (!confirm(`課題「${title}」を削除しますか？\n提出データもすべて失われます。`)) return;
-    setAssignments((prev) => prev.filter((asg) => asg.id !== id));
+    try {
+      await databases.deleteDocument(DB_ID, ASSIGNMENTS_COLLECTION_ID, id);
+      await loadAssignments();
+    } catch (err) {
+      console.error('課題削除エラー:', err);
+      alert('課題の削除に失敗しました。');
+    }
   };
 
   // 課題提出 (生徒)
-  const handleSubmitAssignment = (assignmentId: string, dueDate: string) => {
+  const handleSubmitAssignment = async (assignmentId: string, dueDate: string) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため提出できません。');
       return;
@@ -416,32 +522,25 @@ export default function App() {
       return;
     }
 
-    setAssignments((prev) =>
-      prev.map((asg) => {
-        if (asg.id === assignmentId) {
-          const filtered = asg.submissions.filter((s) => s.studentName !== displayUserName);
-          return {
-            ...asg,
-            submissions: [
-              ...filtered,
-              {
-                studentName: displayUserName,
-                submittedAt: new Date().toLocaleString('ja-JP', { hour12: false }),
-                content: text
-              }
-            ]
-          };
+    try {
+      await mutateSubmissions(assignmentId, (subs) => [
+        ...subs.filter((s) => s.studentName !== displayUserName),
+        {
+          studentName: displayUserName,
+          submittedAt: new Date().toLocaleString('ja-JP', { hour12: false }),
+          content: text
         }
-        return asg;
-      })
-    );
-
-    setSubmissionText((prev) => ({ ...prev, [assignmentId]: '' }));
-    alert('課題を提出しました！');
+      ]);
+      setSubmissionText((prev) => ({ ...prev, [assignmentId]: '' }));
+      alert('課題を提出しました！');
+    } catch (err) {
+      console.error('提出エラー:', err);
+      alert('課題の提出に失敗しました。');
+    }
   };
 
   // 提出取り下げ (生徒)
-  const handleCancelSubmission = (assignmentId: string, dueDate: string, previousContent: string) => {
+  const handleCancelSubmission = async (assignmentId: string, dueDate: string, previousContent: string) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため取り下げはできません。');
       return;
@@ -449,79 +548,79 @@ export default function App() {
 
     if (!confirm('提出を取り下げて編集し直しますか？')) return;
 
-    setAssignments((prev) =>
-      prev.map((asg) => {
-        if (asg.id === assignmentId) {
-          return {
-            ...asg,
-            submissions: asg.submissions.filter((s) => s.studentName !== displayUserName)
-          };
-        }
-        return asg;
-      })
-    );
-
-    setSubmissionText((prev) => ({ ...prev, [assignmentId]: previousContent }));
+    try {
+      await mutateSubmissions(assignmentId, (subs) =>
+        subs.filter((s) => s.studentName !== displayUserName)
+      );
+      setSubmissionText((prev) => ({ ...prev, [assignmentId]: previousContent }));
+    } catch (err) {
+      console.error('取り下げエラー:', err);
+      alert('取り下げに失敗しました。');
+    }
   };
 
   // 採点とフィードバック登録 (教員)
-  const handleGradeSubmission = (asgId: string, studentName: string) => {
+  const handleGradeSubmission = async (asgId: string, studentName: string) => {
     const key = `${asgId}-${studentName}`;
     const grade = gradingState[key];
     if (!grade) return;
 
-    setAssignments((prev) =>
-      prev.map((asg) => {
-        if (asg.id === asgId) {
-          return {
-            ...asg,
-            submissions: asg.submissions.map((sub) => {
-              if (sub.studentName === studentName) {
-                return {
-                  ...sub,
-                  score: grade.score || sub.score,
-                  feedback: grade.feedback || sub.feedback
-                };
+    try {
+      await mutateSubmissions(asgId, (subs) =>
+        subs.map((sub) =>
+          sub.studentName === studentName
+            ? {
+                ...sub,
+                score: grade.score || sub.score,
+                feedback: grade.feedback || sub.feedback
               }
-              return sub;
-            })
-          };
-        }
-        return asg;
-      })
-    );
-    alert(`${studentName} さんの評価を保存しました。`);
+            : sub
+        )
+      );
+      alert(`${studentName} さんの評価を保存しました。`);
+    } catch (err) {
+      console.error('採点エラー:', err);
+      alert('評価の保存に失敗しました。');
+    }
   };
 
   // チャンネル作成 (教員)
-  const handleAddChannel = (e: React.FormEvent) => {
+  const handleAddChannel = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newChannelName.trim()) return;
 
-    const id = newChannelName.toLowerCase().replace(/[^a-z0-9]/g, '-');
-    const newChan: ChannelItem = {
-      id: id || `chan-${Date.now()}`,
-      name: newChannelName.trim(),
-      description: newChannelDesc.trim() || 'チャンネルの説明はありません'
-    };
-
-    setChannels((prev) => [...prev, newChan]);
-    setNewChannelName('');
-    setNewChannelDesc('');
-    setShowAddChannelModal(false);
+    try {
+      await databases.createDocument(DB_ID, CHANNELS_COLLECTION_ID, ID.unique(), {
+        name: newChannelName.trim(),
+        description: newChannelDesc.trim() || 'チャンネルの説明はありません',
+        order: channels.length
+      });
+      await loadChannels();
+      setNewChannelName('');
+      setNewChannelDesc('');
+      setShowAddChannelModal(false);
+    } catch (err) {
+      console.error('チャンネル作成エラー:', err);
+      alert('チャンネルの作成に失敗しました。');
+    }
   };
 
   // チャンネル削除 (教員)
-  const handleDeleteChannel = (id: string, name: string) => {
+  const handleDeleteChannel = async (id: string, name: string) => {
     if (channels.length <= 1) {
       alert('チャンネルをすべて削除することはできません。');
       return;
     }
     if (!confirm(`チャンネル「#${name}」を削除しますか？`)) return;
 
-    setChannels((prev) => prev.filter((c) => c.id !== id));
-    if (activeChannel === id) {
-      setActiveChannel(channels[0].id === id ? channels[1].id : channels[0].id);
+    try {
+      const next = channels.find((c) => c.id !== id);
+      await databases.deleteDocument(DB_ID, CHANNELS_COLLECTION_ID, id);
+      if (activeChannel === id && next) setActiveChannel(next.id);
+      await loadChannels();
+    } catch (err) {
+      console.error('チャンネル削除エラー:', err);
+      alert('チャンネルの削除に失敗しました。');
     }
   };
 
@@ -966,7 +1065,7 @@ export default function App() {
 
               {userRole === 'teacher' && (
                 <button
-                  onClick={() => setShowCreateModal(true)}
+                  onClick={() => { setNewAsgChannel(activeChannel); setShowCreateModal(true); }}
                   className="flex items-center gap-2 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-medium rounded-lg transition-all shadow-md hover:shadow-indigo-500/20"
                 >
                   <PlusCircle size={16} />
