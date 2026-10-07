@@ -100,11 +100,8 @@ interface Assignment {
 const SETTINGS_COLLECTION_ID = 'settings';
 const TEAM_DOC_ID = 'team';
 
-const DEFAULT_CHANNELS = [
-  { name: '一般（講義連絡）', description: '講義全体の連絡・お知らせ' },
-  { name: '質問・相談', description: '課題や講義内容に関する質疑応答' },
-  { name: '演習・実験実習', description: '環境構築や演習の進行' }
-];
+// 初回セットアップ時に作る最初のチャンネル (あとから名前変更・追加が可能)
+const FIRST_CHANNEL = { name: '一般', description: '講義全体の連絡・お知らせ' };
 
 const parseSubmissions = (raw: unknown): Submission[] => {
   if (typeof raw !== 'string' || !raw) return [];
@@ -151,8 +148,13 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<'posts' | 'files' | 'assignments' | 'settings'>('posts');
   
   // チーム・チャンネル
-  const [teamName, setTeamName] = useState('情報通信工学 演習クラス');
-  const [teamNameDraft, setTeamNameDraft] = useState('情報通信工学 演習クラス');
+  const [teamName, setTeamName] = useState('');
+  const [teamNameDraft, setTeamNameDraft] = useState('');
+  // チームの作成状況: loading=確認中 / none=未作成(初回) / ready=作成済み / error=読み込み失敗
+  const [teamStatus, setTeamStatus] = useState<'loading' | 'none' | 'ready' | 'error'>('loading');
+  const [teamError, setTeamError] = useState('');
+  const [setupName, setSetupName] = useState('');
+  const [setupBusy, setSetupBusy] = useState(false);
   const [channels, setChannels] = useState<ChannelItem[]>([]);
   const [activeChannel, setActiveChannel] = useState('');
   const [newChannelName, setNewChannelName] = useState('');
@@ -237,6 +239,7 @@ export default function App() {
       await account.deleteSession('current');
       setCurrentUser(null);
       setMessages([]);
+      setTeamStatus('loading');
     } catch (err) {
       console.error('ログアウトエラー:', err);
     }
@@ -246,21 +249,9 @@ export default function App() {
   const displayUserName = currentUser?.name || '受講生';
 
   // チャンネル・課題の読み込み (Appwrite)
-  const seededRef = useRef(false);
-
   const loadChannels = async () => {
     try {
       const res = await databases.listDocuments(DB_ID, CHANNELS_COLLECTION_ID, [Query.limit(100)]);
-      if (res.documents.length === 0 && userRole === 'teacher' && !seededRef.current) {
-        seededRef.current = true;
-        for (let i = 0; i < DEFAULT_CHANNELS.length; i++) {
-          await databases.createDocument(DB_ID, CHANNELS_COLLECTION_ID, ID.unique(), {
-            ...DEFAULT_CHANNELS[i],
-            order: i
-          });
-        }
-        return loadChannels();
-      }
       setChannels(sortDocs(res.documents).map(toChannel));
     } catch (err) {
       console.error('チャンネル取得エラー:', err);
@@ -273,10 +264,35 @@ export default function App() {
       if (d.teamName) {
         setTeamName(d.teamName);
         setTeamNameDraft(d.teamName);
+        setTeamStatus('ready');
+      } else {
+        setTeamName('');
+        setTeamStatus('none');
       }
     } catch (err: any) {
-      // 404 = まだ一度も保存されていない (初期値のまま)
-      if (err?.code !== 404) console.error('チーム名取得エラー:', err);
+      const type = String(err?.type || '');
+      // 「行が無い」場合だけが未作成。テーブルが無い・権限なしなどは別扱いにする
+      if (err?.code === 404 && /document|row/.test(type)) {
+        setTeamName('');
+        setTeamStatus('none');
+      } else {
+        console.error('チーム情報取得エラー:', err);
+        setTeamError(err?.message || '不明なエラー');
+        setTeamStatus('error');
+      }
+    }
+  };
+
+  // 保存(新規作成も兼ねる)
+  const saveTeamName = async (name: string) => {
+    try {
+      await databases.updateDocument(DB_ID, SETTINGS_COLLECTION_ID, TEAM_DOC_ID, { teamName: name });
+    } catch (err: any) {
+      if (err?.code === 404 && /document|row/.test(String(err?.type || ''))) {
+        await databases.createDocument(DB_ID, SETTINGS_COLLECTION_ID, TEAM_DOC_ID, { teamName: name });
+      } else {
+        throw err;
+      }
     }
   };
 
@@ -287,17 +303,43 @@ export default function App() {
       return;
     }
     try {
-      try {
-        await databases.updateDocument(DB_ID, SETTINGS_COLLECTION_ID, TEAM_DOC_ID, { teamName: name });
-      } catch (err: any) {
-        if (err?.code !== 404) throw err;
-        await databases.createDocument(DB_ID, SETTINGS_COLLECTION_ID, TEAM_DOC_ID, { teamName: name });
-      }
+      await saveTeamName(name);
       setTeamName(name);
       alert('チーム名を更新しました。');
     } catch (err) {
       console.error('チーム名保存エラー:', err);
       alert('チーム名の保存に失敗しました。');
+    }
+  };
+
+  // 初回セットアップ (管理者がチームを作成)
+  const handleCreateTeam = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = setupName.trim();
+    if (!name) return;
+
+    setSetupBusy(true);
+    try {
+      await saveTeamName(name);
+      // チャンネルが1つも無いときだけ、最初のチャンネルを作る
+      const existing = await databases.listDocuments(DB_ID, CHANNELS_COLLECTION_ID, [Query.limit(1)]);
+      if (existing.documents.length === 0) {
+        await databases.createDocument(DB_ID, CHANNELS_COLLECTION_ID, ID.unique(), {
+          ...FIRST_CHANNEL,
+          order: 0
+        });
+      }
+      setTeamName(name);
+      setTeamNameDraft(name);
+      setTeamStatus('ready');
+      setCurrentNav('teams');
+      setCurrentTab('posts');
+      await loadChannels();
+    } catch (err) {
+      console.error('チーム作成エラー:', err);
+      alert('チームの作成に失敗しました。Appwrite の settings テーブルと権限を確認してください。');
+    } finally {
+      setSetupBusy(false);
     }
   };
 
@@ -809,6 +851,103 @@ export default function App() {
           </form>
         </div>
       </div>
+    );
+  }
+
+  // チーム未作成・確認中・読み込み失敗の画面
+  if (teamStatus !== 'ready') {
+    const shell = (children: React.ReactNode) => (
+      <div className="flex h-screen items-center justify-center bg-[#18181b] text-gray-200 font-sans p-4">
+        <div className="w-full max-w-md bg-[#242427] border border-[#3f3f46] rounded-xl p-8 shadow-2xl">
+          <div className="flex flex-col items-center mb-6">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-indigo-700 to-indigo-500 flex items-center justify-center font-bold text-white text-xl shadow-lg mb-3">
+              ET
+            </div>
+          </div>
+          {children}
+          <button
+            onClick={handleLogout}
+            className="mt-5 w-full flex items-center justify-center gap-1.5 text-[11px] text-gray-400 hover:text-white transition-colors"
+          >
+            <LogOut size={12} />
+            ログアウト
+          </button>
+        </div>
+      </div>
+    );
+
+    if (teamStatus === 'loading') {
+      return (
+        <div className="flex h-screen items-center justify-center bg-[#18181b] text-gray-300">
+          <div className="text-sm flex items-center gap-2 animate-pulse">
+            <Clock className="animate-spin text-indigo-400" size={18} />
+            チーム情報を確認中...
+          </div>
+        </div>
+      );
+    }
+
+    if (teamStatus === 'error') {
+      return shell(
+        <>
+          <h1 className="text-base font-bold text-white text-center">チーム情報を読み込めませんでした</h1>
+          <p className="text-xs text-gray-400 mt-3 leading-relaxed">
+            Appwrite の <code className="text-indigo-300">settings</code> テーブルが存在するか、ログイン済みユーザーに Read 権限があるかを確認してください。
+          </p>
+          <p className="text-[11px] text-red-300 mt-3 bg-red-950/30 border border-red-500/30 rounded p-2 break-all">{teamError}</p>
+          <button
+            onClick={() => { setTeamStatus('loading'); loadTeamName(); }}
+            className="mt-4 w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg transition-colors"
+          >
+            再読み込み
+          </button>
+        </>
+      );
+    }
+
+    // teamStatus === 'none'
+    if (userRole === 'teacher') {
+      return shell(
+        <>
+          <h1 className="text-lg font-bold text-white text-center">EduTeams へようこそ</h1>
+          <p className="text-xs text-gray-400 mt-2 text-center leading-relaxed">
+            まだチームが作成されていません。<br />最初に、チームの名前を決めてください。
+          </p>
+          <form onSubmit={handleCreateTeam} className="mt-5 space-y-3">
+            <div>
+              <label className="text-xs text-gray-300 font-medium block mb-1">チーム名</label>
+              <input
+                type="text"
+                required
+                autoFocus
+                value={setupName}
+                onChange={(e) => setSetupName(e.target.value)}
+                placeholder="例: ○○学 演習クラス"
+                className="w-full bg-[#18181b] border border-gray-700 rounded-lg p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
+              />
+            </div>
+            <p className="text-[11px] text-gray-500 leading-relaxed">
+              「一般」チャンネルを1つ自動で作成します。チャンネルの追加や名前の変更は、あとから管理設定で行えます。
+            </p>
+            <button
+              type="submit"
+              disabled={setupBusy || !setupName.trim()}
+              className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed active:scale-95 text-white text-xs font-medium rounded-lg transition-all shadow"
+            >
+              {setupBusy ? '作成中...' : 'チームを作成して始める'}
+            </button>
+          </form>
+        </>
+      );
+    }
+
+    return shell(
+      <>
+        <h1 className="text-base font-bold text-white text-center">チームの準備中です</h1>
+        <p className="text-xs text-gray-400 mt-3 text-center leading-relaxed">
+          管理者(教員)がチームを作成すると、この画面が自動で切り替わります。<br />しばらくお待ちください。
+        </p>
+      </>
     );
   }
 
