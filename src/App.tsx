@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ID, Query } from 'appwrite';
 import type { Models } from 'appwrite';
+import FileAttachment from './FileAttachment';
 import { 
   client, 
   databases, 
@@ -29,7 +30,6 @@ import {
   Calendar, 
   AlertCircle, 
   RotateCcw, 
-  Download, 
   X, 
   LogOut, 
   Lock, 
@@ -70,10 +70,17 @@ interface ChannelItem {
   description: string;
 }
 
+interface SubFile {
+  id: string;
+  name: string;
+  url: string;
+}
+
 interface Submission {
   studentName: string;
   submittedAt: string;
   content: string;
+  files?: SubFile[];
   score?: string;
   feedback?: string;
 }
@@ -88,6 +95,10 @@ interface Assignment {
   attachmentUrl?: string;
   submissions: Submission[];
 }
+
+// チーム名などの共通設定 (Appwriteのテーブルid「settings」、行id「team」)
+const SETTINGS_COLLECTION_ID = 'settings';
+const TEAM_DOC_ID = 'team';
 
 const DEFAULT_CHANNELS = [
   { name: '一般（講義連絡）', description: '講義全体の連絡・お知らせ' },
@@ -141,6 +152,7 @@ export default function App() {
   
   // チーム・チャンネル
   const [teamName, setTeamName] = useState('情報通信工学 演習クラス');
+  const [teamNameDraft, setTeamNameDraft] = useState('情報通信工学 演習クラス');
   const [channels, setChannels] = useState<ChannelItem[]>([]);
   const [activeChannel, setActiveChannel] = useState('');
   const [newChannelName, setNewChannelName] = useState('');
@@ -170,6 +182,9 @@ export default function App() {
   // 課題
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [submissionText, setSubmissionText] = useState<{ [key: string]: string }>({});
+  const [submissionFiles, setSubmissionFiles] = useState<{ [key: string]: File[] }>({});
+  const [submissionKept, setSubmissionKept] = useState<{ [key: string]: SubFile[] }>({});
+  const [submittingId, setSubmittingId] = useState<string | null>(null);
   
   // 課題作成モーダル用ステート
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -252,6 +267,40 @@ export default function App() {
     }
   };
 
+  const loadTeamName = async () => {
+    try {
+      const d: any = await databases.getDocument(DB_ID, SETTINGS_COLLECTION_ID, TEAM_DOC_ID);
+      if (d.teamName) {
+        setTeamName(d.teamName);
+        setTeamNameDraft(d.teamName);
+      }
+    } catch (err: any) {
+      // 404 = まだ一度も保存されていない (初期値のまま)
+      if (err?.code !== 404) console.error('チーム名取得エラー:', err);
+    }
+  };
+
+  const handleSaveTeamName = async () => {
+    const name = teamNameDraft.trim();
+    if (!name) {
+      alert('チーム名を入力してください。');
+      return;
+    }
+    try {
+      try {
+        await databases.updateDocument(DB_ID, SETTINGS_COLLECTION_ID, TEAM_DOC_ID, { teamName: name });
+      } catch (err: any) {
+        if (err?.code !== 404) throw err;
+        await databases.createDocument(DB_ID, SETTINGS_COLLECTION_ID, TEAM_DOC_ID, { teamName: name });
+      }
+      setTeamName(name);
+      alert('チーム名を更新しました。');
+    } catch (err) {
+      console.error('チーム名保存エラー:', err);
+      alert('チーム名の保存に失敗しました。');
+    }
+  };
+
   const loadAssignments = async () => {
     try {
       const res = await databases.listDocuments(DB_ID, ASSIGNMENTS_COLLECTION_ID, [Query.limit(100)]);
@@ -267,6 +316,7 @@ export default function App() {
     if (!currentUser) return;
     loadChannels();
     loadAssignments();
+    loadTeamName();
 
     const unsubChannels = client.subscribe(
       `databases.${DB_ID}.collections.${CHANNELS_COLLECTION_ID}.documents`,
@@ -277,9 +327,15 @@ export default function App() {
       () => { loadAssignments(); }
     );
 
+    const unsubSettings = client.subscribe(
+      `databases.${DB_ID}.collections.${SETTINGS_COLLECTION_ID}.documents`,
+      () => { loadTeamName(); }
+    );
+
     return () => {
       unsubChannels();
       unsubAssignments();
+      unsubSettings();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
@@ -509,38 +565,62 @@ export default function App() {
     }
   };
 
-  // 課題提出 (生徒)
+  // 課題提出 (生徒・ファイル添付対応)
   const handleSubmitAssignment = async (assignmentId: string, dueDate: string) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため提出できません。');
       return;
     }
 
-    const text = submissionText[assignmentId];
-    if (!text || !text.trim()) {
-      alert('提出内容を入力してください。');
+    const text = (submissionText[assignmentId] || '').trim();
+    const pending = submissionFiles[assignmentId] || [];
+    const kept = submissionKept[assignmentId] || [];
+    if (!text && pending.length === 0 && kept.length === 0) {
+      alert('提出内容を入力するか、ファイルを添付してください。');
       return;
     }
 
+    setSubmittingId(assignmentId);
     try {
+      const uploaded: SubFile[] = [];
+      for (const file of pending) {
+        const up = await storage.createFile(STORAGE_BUCKET_ID, ID.unique(), file);
+        uploaded.push({
+          id: up.$id,
+          name: file.name,
+          url: storage.getFileDownload(STORAGE_BUCKET_ID, up.$id).toString()
+        });
+      }
+      const files = [...kept, ...uploaded];
+
       await mutateSubmissions(assignmentId, (subs) => [
         ...subs.filter((s) => s.studentName !== displayUserName),
         {
           studentName: displayUserName,
           submittedAt: new Date().toLocaleString('ja-JP', { hour12: false }),
-          content: text
+          content: text,
+          ...(files.length > 0 && { files })
         }
       ]);
       setSubmissionText((prev) => ({ ...prev, [assignmentId]: '' }));
+      setSubmissionFiles((prev) => ({ ...prev, [assignmentId]: [] }));
+      setSubmissionKept((prev) => ({ ...prev, [assignmentId]: [] }));
       alert('課題を提出しました！');
     } catch (err) {
       console.error('提出エラー:', err);
       alert('課題の提出に失敗しました。');
+    } finally {
+      setSubmittingId(null);
     }
   };
 
   // 提出取り下げ (生徒)
-  const handleCancelSubmission = async (assignmentId: string, dueDate: string, previousContent: string) => {
+  const handleCancelSubmission = async (
+    assignmentId: string,
+    dueDate: string,
+    previousContent: string,
+    previousFiles: SubFile[] = []
+  ) => {
     if (new Date().getTime() > new Date(dueDate).getTime()) {
       alert('提出期限を過ぎているため取り下げはできません。');
       return;
@@ -553,6 +633,7 @@ export default function App() {
         subs.filter((s) => s.studentName !== displayUserName)
       );
       setSubmissionText((prev) => ({ ...prev, [assignmentId]: previousContent }));
+      setSubmissionKept((prev) => ({ ...prev, [assignmentId]: previousFiles }));
     } catch (err) {
       console.error('取り下げエラー:', err);
       alert('取り下げに失敗しました。');
@@ -643,19 +724,7 @@ export default function App() {
       }
       const fileName = match[1];
       const fileUrl = match[2];
-      parts.push(
-        <a
-          key={match.index}
-          href={fileUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 my-1.5 bg-[#2a2a2a] hover:bg-[#333] border border-gray-600 rounded text-xs text-indigo-300 hover:text-indigo-200 transition-all duration-200 shadow-sm hover:shadow"
-        >
-          <FileText size={14} />
-          <span>{fileName}</span>
-          <Download size={12} className="ml-1 text-gray-400" />
-        </a>
-      );
+      parts.push(<FileAttachment key={match.index} name={fileName} url={fileUrl} />);
       lastIndex = fileRegex.lastIndex;
     }
 
@@ -1029,21 +1098,13 @@ export default function App() {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {sharedFiles.map((file) => (
-                <a
+                <div
                   key={file.id}
-                  href={file.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="p-4 bg-[#262626] border border-[#383838] rounded-xl hover:border-indigo-500/50 hover:bg-[#2c2c2c] transition-all duration-200 transform hover:-translate-y-1 hover:shadow-lg block group"
+                  className="p-4 bg-[#262626] border border-[#383838] rounded-xl hover:border-indigo-500/50 hover:bg-[#2c2c2c] transition-all duration-200 space-y-1"
                 >
-                  <div className="flex items-center gap-3 mb-2">
-                    <FileText className="text-indigo-400 shrink-0 transition-transform group-hover:scale-110" size={24} />
-                    <div className="overflow-hidden">
-                      <h3 className="text-xs font-medium text-white truncate group-hover:text-indigo-300">{file.name}</h3>
-                      <p className="text-[10px] text-gray-400">{file.date} • {file.size}</p>
-                    </div>
-                  </div>
-                </a>
+                  <FileAttachment name={file.name} url={file.url} />
+                  <p className="text-[10px] text-gray-400">{file.date} • {file.size}</p>
+                </div>
               ))}
             </div>
           </div>
@@ -1337,19 +1398,7 @@ export default function App() {
                     {/* 教員が設定した配布資料（PDFやWord）のダウンロードカード */}
                     {asg.attachmentName && asg.attachmentUrl && (
                       <div className="mt-3">
-                        <a
-                          href={asg.attachmentUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-2 px-3 py-2 bg-[#2a2a2d] hover:bg-[#333338] border border-indigo-500/40 rounded-lg text-xs text-indigo-300 hover:text-indigo-200 transition-all duration-200 shadow-sm hover:scale-[1.02]"
-                        >
-                          <FileText size={16} className="text-indigo-400" />
-                          <div className="flex flex-col text-left">
-                            <span className="font-medium">{asg.attachmentName}</span>
-                            <span className="text-[10px] text-gray-400">クリックして配布資料をダウンロード</span>
-                          </div>
-                          <Download size={13} className="ml-2 text-indigo-400" />
-                        </a>
+                        <FileAttachment name={asg.attachmentName} url={asg.attachmentUrl} />
                       </div>
                     )}
 
@@ -1368,7 +1417,7 @@ export default function App() {
 
                               {!isPastDue ? (
                                 <button
-                                  onClick={() => handleCancelSubmission(asg.id, asg.dueDate, mySubmission.content)}
+                                  onClick={() => handleCancelSubmission(asg.id, asg.dueDate, mySubmission.content, mySubmission.files)}
                                   className="flex items-center gap-1 px-2.5 py-1 text-[11px] text-gray-300 hover:text-white bg-[#2b2b2b] hover:bg-[#383838] active:scale-95 border border-gray-600 rounded-md transition-all"
                                 >
                                   <RotateCcw size={12} />
@@ -1382,9 +1431,18 @@ export default function App() {
                               )}
                             </div>
 
-                            <p className="text-xs text-gray-300 bg-[#191919] p-2.5 rounded-md border border-[#2e2e2e] leading-relaxed">
-                              {mySubmission.content}
-                            </p>
+                            {mySubmission.content && (
+                              <p className="text-xs text-gray-300 bg-[#191919] p-2.5 rounded-md border border-[#2e2e2e] leading-relaxed whitespace-pre-wrap">
+                                {mySubmission.content}
+                              </p>
+                            )}
+                            {mySubmission.files && mySubmission.files.length > 0 && (
+                              <div>
+                                {mySubmission.files.map((f) => (
+                                  <FileAttachment key={f.id} name={f.name} url={f.url} />
+                                ))}
+                              </div>
+                            )}
 
                             {/* 教員からの評価・採点がある場合 */}
                             {(mySubmission.score || mySubmission.feedback) && (
@@ -1415,12 +1473,70 @@ export default function App() {
                                   placeholder="提出レポートの内容、または成果物URLを入力..."
                                   className="w-full bg-[#1b1b1b] border border-gray-700 rounded-lg p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500 resize-none transition-colors"
                                 />
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] text-gray-300 bg-[#2b2b2b] hover:bg-[#383838] border border-gray-600 rounded-md cursor-pointer transition-all">
+                                    <Paperclip size={12} />
+                                    ファイルを添付
+                                    <input
+                                      type="file"
+                                      multiple
+                                      className="hidden"
+                                      onChange={(e) => {
+                                        const picked = Array.from(e.target.files || []);
+                                        if (picked.length > 0) {
+                                          setSubmissionFiles((prev) => ({
+                                            ...prev,
+                                            [asg.id]: [...(prev[asg.id] || []), ...picked]
+                                          }));
+                                        }
+                                        e.target.value = '';
+                                      }}
+                                    />
+                                  </label>
+                                  {(submissionKept[asg.id] || []).map((f) => (
+                                    <span key={f.id} className="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-gray-300 bg-[#222] border border-gray-700 rounded-md">
+                                      <FileText size={11} />
+                                      {f.name}
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setSubmissionKept((prev) => ({
+                                            ...prev,
+                                            [asg.id]: (prev[asg.id] || []).filter((x) => x.id !== f.id)
+                                          }))
+                                        }
+                                        className="text-gray-500 hover:text-red-400"
+                                      >
+                                        <X size={11} />
+                                      </button>
+                                    </span>
+                                  ))}
+                                  {(submissionFiles[asg.id] || []).map((f, i) => (
+                                    <span key={`${f.name}-${i}`} className="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-indigo-200 bg-indigo-950/40 border border-indigo-500/30 rounded-md">
+                                      <FileText size={11} />
+                                      {f.name}
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setSubmissionFiles((prev) => ({
+                                            ...prev,
+                                            [asg.id]: (prev[asg.id] || []).filter((_, idx) => idx !== i)
+                                          }))
+                                        }
+                                        className="text-gray-400 hover:text-red-400"
+                                      >
+                                        <X size={11} />
+                                      </button>
+                                    </span>
+                                  ))}
+                                </div>
                                 <div className="flex justify-end">
                                   <button
                                     onClick={() => handleSubmitAssignment(asg.id, asg.dueDate)}
-                                    className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-medium rounded-lg transition-all shadow"
+                                    disabled={submittingId === asg.id}
+                                    className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-medium rounded-lg transition-all shadow"
                                   >
-                                    課題を提出する
+                                    {submittingId === asg.id ? '送信中...' : '課題を提出する'}
                                   </button>
                                 </div>
                               </>
@@ -1446,7 +1562,16 @@ export default function App() {
                                     <div>
                                       <span className="font-semibold text-white">{sub.studentName}</span>
                                       <span className="text-[10px] text-gray-500 ml-2">{sub.submittedAt}</span>
-                                      <p className="text-gray-300 mt-1 bg-[#161616] p-2 rounded">{sub.content}</p>
+                                      {sub.content && (
+                                        <p className="text-gray-300 mt-1 bg-[#161616] p-2 rounded whitespace-pre-wrap">{sub.content}</p>
+                                      )}
+                                      {sub.files && sub.files.length > 0 && (
+                                        <div className="mt-1">
+                                          {sub.files.map((f) => (
+                                            <FileAttachment key={f.id} name={f.name} url={f.url} />
+                                          ))}
+                                        </div>
+                                      )}
                                     </div>
                                     <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 shrink-0">
                                       提出済
@@ -1518,12 +1643,12 @@ export default function App() {
               <div className="flex items-center gap-3">
                 <input
                   type="text"
-                  value={teamName}
-                  onChange={(e) => setTeamName(e.target.value)}
+                  value={teamNameDraft}
+                  onChange={(e) => setTeamNameDraft(e.target.value)}
                   className="flex-1 max-w-md bg-[#1b1b1b] border border-gray-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-amber-500 transition-colors"
                 />
                 <button
-                  onClick={() => alert('チーム名を更新しました。')}
+                  onClick={handleSaveTeamName}
                   className="px-3.5 py-2 bg-amber-600 hover:bg-amber-500 active:scale-95 text-white text-xs font-medium rounded-lg transition-all shadow"
                 >
                   名称を更新
